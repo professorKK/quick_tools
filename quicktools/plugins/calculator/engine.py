@@ -87,6 +87,73 @@ def validate_base(base: int) -> int:
     return base
 
 
+_OPERATOR_CHARS = frozenset("+-*/%^()")
+_PREFIX_BASES = {"x": 16, "X": 16, "b": 2, "B": 2, "o": 8, "O": 8}
+
+
+def filter_input(text: str, base: int = 10) -> str:
+    """Drop characters that cannot appear in an expression in ``base``.
+
+    Bare digits are limited to the active base (``8`` is dropped in octal,
+    only ``0``/``1`` in binary and ``0-9 A-F`` in hex); letters are dropped
+    outside hex. The decimal point is kept only in decimal mode. Explicit
+    ``0x`` / ``0b`` / ``0o`` prefixed numbers remain available in every mode,
+    and operators, parentheses and whitespace are always kept.
+    """
+    validate_base(base)
+    return _filter_input(normalize_text(text), base)
+
+
+def _filter_input(text: str, base: int) -> str:
+    valid_digits = _DIGITS_BY_BASE[base]
+    out: list[str] = []
+    at_token_start = True
+    token_has_dot = False
+    i = 0
+    n = len(text)
+    while i < n:
+        ch = text[i]
+        if ch.isspace():
+            out.append(ch)
+            i += 1
+            at_token_start = True
+            token_has_dot = False
+            continue
+        if ch in _OPERATOR_CHARS:
+            out.append(ch)
+            i += 1
+            at_token_start = True
+            token_has_dot = False
+            continue
+        if ch == "." and base == 10 and not token_has_dot:
+            out.append(ch)
+            i += 1
+            at_token_start = False
+            token_has_dot = True
+            continue
+        if at_token_start and ch == "0" and i + 1 < n:
+            prefix_base = _PREFIX_BASES.get(text[i + 1])
+            if prefix_base is not None:
+                digits = _DIGITS_BY_BASE[prefix_base]
+                out.append(ch)
+                out.append(text[i + 1])
+                i += 2
+                while i < n and text[i] in digits:
+                    out.append(text[i])
+                    i += 1
+                at_token_start = False
+                token_has_dot = True  # prefixed numbers are integers
+                continue
+        if ch in valid_digits:
+            out.append(ch)
+            i += 1
+            at_token_start = False
+            continue
+        # Character cannot appear in this base; drop it.
+        i += 1
+    return "".join(out)
+
+
 def _error(message: str, pos: int | None = None) -> ExpressionError:
     if pos is None:
         return ExpressionError(message)
@@ -343,6 +410,61 @@ def evaluate(expression: str, base: int = 10) -> int | float:
         return parser.parse()
     except RecursionError:
         raise ExpressionError("表达式嵌套过深") from None
+
+
+# A dangling operator is read as its identity operation: adding/subtracting
+# zero and multiplying/dividing/modulo by one keep the typed value.
+_TRAILING_IDENTITIES = {
+    "+": "0",
+    "-": "0",
+    "*": "1",
+    "/": "1",
+    "//": "1",
+    "%": "1",
+}
+
+
+def _complete_trailing_operator(text: str, base: int) -> str | None:
+    """Append an implicit operand for a dangling basic operator.
+
+    Returns ``None`` when the trailing operator cannot be completed (power
+    operators) or when the text before it is not already a valid expression,
+    which also rejects unbalanced parentheses such as ``1+(1+``.
+    """
+    stripped = text.rstrip()
+    for op in ("**", "//", "+", "-", "*", "/", "%"):
+        if not stripped.endswith(op):
+            continue
+        identity = _TRAILING_IDENTITIES.get(op)
+        if identity is None:
+            return None
+        prefix = stripped[: -len(op)]
+        try:
+            evaluate(prefix, base)
+        except ExpressionError:
+            return None
+        return prefix + op + identity
+    return None
+
+
+def evaluate_live(expression: str, base: int = 10) -> int | float:
+    """Evaluate an expression as it is being typed.
+
+    Unlike :func:`evaluate`, a dangling ``+``/``-`` is treated as
+    ``+0``/``-0`` and a dangling ``*``/``/``/``//``/``%`` as
+    ``*1``/``/1``/``//1``/``%1``. Power operators and unbalanced
+    parentheses stay non-calculable.
+    """
+    text = normalize_text(expression).strip()
+    if not text:
+        raise ExpressionError("表达式为空")
+    try:
+        return evaluate(text, base)
+    except ExpressionError:
+        completed = _complete_trailing_operator(text, base)
+        if completed is None:
+            raise
+        return evaluate(completed, base)
 
 
 def format_decimal(value: int | float) -> str:

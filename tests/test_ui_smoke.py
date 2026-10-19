@@ -60,7 +60,7 @@ def test_evaluate_and_add_row(view) -> None:
     assert calculator._conversion_vars[16].get() == "0x2"
 
 
-def test_mouse_position_edit_and_result_clear(view) -> None:
+def test_mouse_position_edit_recalculates_result(view) -> None:
     calculator, root = view
     entry = calculator.current_row.entry
     entry.insert(0, "12+34")
@@ -72,8 +72,8 @@ def test_mouse_position_edit_and_result_clear(view) -> None:
     entry.insert(tk.INSERT, "9")
     root.update()
     assert entry.get() == "129+34"
-    assert calculator.rows[0].result_value is None
-    assert calculator.rows[0].result_label.cget("text") == ""
+    assert calculator.rows[0].result_value == 163
+    assert calculator.rows[0].result_label.cget("text") == "= 163"
 
 
 def test_fullwidth_parentheses_normalized(view) -> None:
@@ -96,6 +96,44 @@ def test_hex_mode_and_conversions(view) -> None:
     assert calculator.rows[0].result_label.cget("text") == "= 0xFF"
     assert calculator._conversion_vars[10].get() == "255"
     assert calculator._conversion_vars[2].get() == "0b1111 1111"
+
+
+def test_result_updates_while_typing(view) -> None:
+    calculator, root = view
+    entry = calculator.current_row.entry
+    for ch in "1+2*":
+        entry.insert(tk.INSERT, ch)
+        root.update_idletasks()
+    assert calculator.current_row.result_label.cget("text") == "= 3"
+    assert calculator._conversion_vars[10].get() == "3"
+
+
+def test_uncalculable_input_shows_no_result(view) -> None:
+    calculator, root = view
+    entry = calculator.current_row.entry
+    entry.insert(0, "1^")
+    root.update_idletasks()
+    assert calculator.current_row.result_label.cget("text") == ""
+    assert calculator._conversion_vars[10].get() == "—"
+
+
+def test_hex_input_filters_invalid_chars_and_uses_hex(view) -> None:
+    calculator, root = view
+    calculator.set_base(16)
+    calculator.current_row.entry.insert(0, "G11+11")
+    root.update_idletasks()
+    assert calculator.current_row.entry.get() == "11+11"
+    assert calculator.current_row.result_label.cget("text") == "= 0x22"
+    assert calculator._conversion_vars[10].get() == "34"
+
+
+def test_binary_input_filters_non_binary_digits(view) -> None:
+    calculator, root = view
+    calculator.set_base(2)
+    calculator.current_row.entry.insert(0, "102+1")
+    root.update_idletasks()
+    assert calculator.current_row.entry.get() == "10+1"
+    assert calculator.current_row.result_label.cget("text") == "= 0b11"
 
 
 def test_operators_form_left_column_in_plus_minus_multiply_divide_order(view) -> None:

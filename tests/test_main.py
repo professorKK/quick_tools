@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import argparse
+import os
 from typing import ClassVar
 
 import pytest
@@ -37,7 +39,28 @@ def patched(monkeypatch: pytest.MonkeyPatch) -> FakeIpc:
     monkeypatch.setattr(cli, "setup_logging", lambda: None)
     monkeypatch.setattr(cli, "QuickToolsApp", FakeApp)
     monkeypatch.setattr(cli, "send_command", ipc)
+    # Keep detach detection deterministic: source build without a TTY.
+    monkeypatch.setattr(cli, "_is_linux", lambda: True)
+    monkeypatch.setattr(cli, "_is_frozen", lambda: False)
+    monkeypatch.setattr(cli, "_has_terminal", lambda: False)
+    monkeypatch.delenv(cli._DETACH_ENV, raising=False)
     return ipc
+
+
+@pytest.fixture()
+def detached(
+    monkeypatch: pytest.MonkeyPatch, patched: FakeIpc
+) -> list[list[str]]:
+    spawned: list[list[str]] = []
+    monkeypatch.setattr(cli, "_is_frozen", lambda: True)
+    monkeypatch.setattr(cli, "_has_terminal", lambda: True)
+
+    def fake_spawn(argv: list[str]) -> bool:
+        spawned.append(list(argv))
+        return True
+
+    monkeypatch.setattr(cli, "_spawn_detached", fake_spawn)
+    return spawned
 
 
 def test_background_exits_silently_when_instance_runs(patched: FakeIpc) -> None:
@@ -91,3 +114,249 @@ def test_background_is_mutually_exclusive(patched: FakeIpc) -> None:
     with pytest.raises(SystemExit):
         cli.main(["--background", "--show"])
     assert patched.commands == []
+
+
+# ------------------------------------------------------- terminal detachment
+def test_packaged_terminal_launch_detaches(
+    patched: FakeIpc, detached: list[list[str]]
+) -> None:
+    patched.result = False
+
+    assert cli.main([]) == 0
+
+    assert patched.commands == ["show"]
+    assert detached == [[]]
+    assert FakeApp.instances == []
+
+
+def test_background_detaches(
+    patched: FakeIpc, detached: list[list[str]]
+) -> None:
+    patched.result = False
+
+    assert cli.main(["--background"]) == 0
+
+    assert patched.commands == ["ping"]
+    assert detached == [["--background"]]
+    assert FakeApp.instances == []
+
+
+def test_toggle_detaches_and_forwards_args(
+    patched: FakeIpc, detached: list[list[str]]
+) -> None:
+    patched.result = False
+
+    assert cli.main(["--toggle"]) == 0
+
+    assert patched.commands == ["toggle"]
+    assert detached == [["--toggle"]]
+    assert FakeApp.instances == []
+
+
+def test_quit_never_detaches(
+    patched: FakeIpc, detached: list[list[str]]
+) -> None:
+    patched.result = False
+
+    assert cli.main(["--quit"]) == 0
+
+    assert patched.commands == ["quit"]
+    assert detached == []
+    assert FakeApp.instances == []
+
+
+def test_foreground_never_detaches(
+    patched: FakeIpc, detached: list[list[str]]
+) -> None:
+    patched.result = False
+
+    assert cli.main(["--foreground"]) == 0
+
+    assert detached == []
+    assert FakeApp.instances[0].start_visible is True
+    assert FakeApp.instances[0].ran
+
+
+def test_source_mode_never_detaches(
+    monkeypatch: pytest.MonkeyPatch, patched: FakeIpc
+) -> None:
+    spawned: list[list[str]] = []
+    monkeypatch.setattr(cli, "_is_frozen", lambda: False)
+    monkeypatch.setattr(cli, "_has_terminal", lambda: True)
+    monkeypatch.setattr(
+        cli, "_spawn_detached", lambda argv: spawned.append(argv) or True
+    )
+    patched.result = False
+
+    assert cli.main([]) == 0
+
+    assert spawned == []
+    assert FakeApp.instances[0].start_visible is True
+
+
+def test_no_terminal_never_detaches(
+    monkeypatch: pytest.MonkeyPatch, patched: FakeIpc
+) -> None:
+    spawned: list[list[str]] = []
+    monkeypatch.setattr(cli, "_is_frozen", lambda: True)
+    monkeypatch.setattr(cli, "_has_terminal", lambda: False)
+    monkeypatch.setattr(
+        cli, "_spawn_detached", lambda argv: spawned.append(argv) or True
+    )
+    patched.result = False
+
+    assert cli.main([]) == 0
+
+    assert spawned == []
+    assert FakeApp.instances[0].start_visible is True
+
+
+def test_env_guard_prevents_recursion(
+    monkeypatch: pytest.MonkeyPatch, patched: FakeIpc
+) -> None:
+    spawned: list[list[str]] = []
+    monkeypatch.setattr(cli, "_is_frozen", lambda: True)
+    monkeypatch.setattr(cli, "_has_terminal", lambda: True)
+    monkeypatch.setenv(cli._DETACH_ENV, cli._DETACH_VALUE)
+    monkeypatch.setattr(
+        cli, "_spawn_detached", lambda argv: spawned.append(argv) or True
+    )
+    patched.result = False
+
+    assert cli.main([]) == 0
+
+    assert spawned == []
+    assert FakeApp.instances[0].start_visible is True
+
+
+def test_detach_spawn_failure_returns_one(
+    monkeypatch: pytest.MonkeyPatch,
+    patched: FakeIpc,
+    detached: list[list[str]],
+) -> None:
+    monkeypatch.setattr(cli, "_spawn_detached", lambda argv: False)
+    patched.result = False
+
+    assert cli.main([]) == 1
+
+    assert FakeApp.instances == []
+
+
+def test_argv_none_forwards_sys_argv(
+    monkeypatch: pytest.MonkeyPatch,
+    patched: FakeIpc,
+    detached: list[list[str]],
+) -> None:
+    monkeypatch.setattr(cli.sys, "argv", ["/opt/QuickTools/QuickTools", "--show"])
+    patched.result = False
+
+    assert cli.main() == 0
+
+    assert detached == [["--show"]]
+
+
+def test_should_detach_guards(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(cli, "_is_linux", lambda: True)
+    monkeypatch.setattr(cli, "_is_frozen", lambda: True)
+    monkeypatch.setattr(cli, "_has_terminal", lambda: True)
+    monkeypatch.delenv(cli._DETACH_ENV, raising=False)
+
+    def args(**overrides: bool) -> argparse.Namespace:
+        values = {"foreground": False, "tray_helper": False, "quit": False}
+        values.update(overrides)
+        return argparse.Namespace(**values)
+
+    assert cli._should_detach(args()) is True
+    assert cli._should_detach(args(foreground=True)) is False
+    assert cli._should_detach(args(tray_helper=True)) is False
+    assert cli._should_detach(args(quit=True)) is False
+
+    monkeypatch.setenv(cli._DETACH_ENV, cli._DETACH_VALUE)
+    assert cli._should_detach(args()) is False
+
+
+def test_detach_command_frozen(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(cli, "_is_frozen", lambda: True)
+    monkeypatch.setattr(cli.sys, "executable", "/opt/QuickTools/QuickTools")
+
+    assert cli._detach_command(["--show"]) == [
+        "/opt/QuickTools/QuickTools",
+        "--show",
+    ]
+
+
+def test_detach_command_source(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(cli, "_is_frozen", lambda: False)
+    monkeypatch.setattr(cli.sys, "executable", "/usr/bin/python3")
+
+    assert cli._detach_command([]) == [
+        "/usr/bin/python3",
+        "-m",
+        "quicktools",
+    ]
+
+
+def test_spawn_detached_popen_contract(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: dict[str, object] = {}
+
+    class FakeProcess:
+        pid = 4321
+
+    def fake_popen(command: list[str], **kwargs: object) -> FakeProcess:
+        calls["command"] = command
+        calls["kwargs"] = kwargs
+        return FakeProcess()
+
+    monkeypatch.setattr(cli, "_is_frozen", lambda: True)
+    monkeypatch.setattr(cli.sys, "executable", "/opt/QuickTools/QuickTools")
+    monkeypatch.setattr(cli.subprocess, "Popen", fake_popen)
+    monkeypatch.delenv(cli._DETACH_ENV, raising=False)
+
+    assert cli._spawn_detached(["--background"]) is True
+
+    assert calls["command"] == [
+        "/opt/QuickTools/QuickTools",
+        "--background",
+    ]
+    kwargs = calls["kwargs"]
+    assert isinstance(kwargs, dict)
+    assert kwargs["stdin"] is cli.subprocess.DEVNULL
+    assert kwargs["stdout"] is cli.subprocess.DEVNULL
+    assert kwargs["stderr"] is cli.subprocess.DEVNULL
+    assert kwargs["close_fds"] is True
+    assert kwargs["start_new_session"] is True
+    env = kwargs["env"]
+    assert isinstance(env, dict)
+    assert env[cli._DETACH_ENV] == cli._DETACH_VALUE
+    assert os.environ.get(cli._DETACH_ENV) is None
+
+
+def test_spawn_detached_handles_oserror(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fake_popen(*args: object, **kwargs: object) -> None:
+        raise OSError("boom")
+
+    monkeypatch.setattr(cli.subprocess, "Popen", fake_popen)
+
+    assert cli._spawn_detached([]) is False
+
+
+class _FakeStream:
+    def __init__(self, result: object) -> None:
+        self._result = result
+
+    def isatty(self) -> bool:
+        if isinstance(self._result, BaseException):
+            raise self._result
+        return bool(self._result)
+
+
+def test_stream_is_tty_edge_cases() -> None:
+    assert cli._stream_is_tty(_FakeStream(True)) is True
+    assert cli._stream_is_tty(_FakeStream(False)) is False
+    assert cli._stream_is_tty(None) is False
+    assert cli._stream_is_tty(object()) is False
+    assert cli._stream_is_tty(_FakeStream(ValueError("closed"))) is False

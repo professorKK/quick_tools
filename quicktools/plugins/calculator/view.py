@@ -26,12 +26,18 @@ from quicktools.plugins.calculator.engine import (
     SUPPORTED_BASES,
     ExpressionError,
     convert_bases,
-    evaluate,
+    evaluate_live,
+    filter_input,
     format_result,
     normalize_text,
 )
 
 _PAD_X = 12
+_STATUS_HINT = "自动计算 · Enter 新建下一层 · 支持 0x / 0b / 0o 前缀"
+# The selected base tag is emphasized with color, weight and size.
+_INACTIVE_TAG_SIZE = 9
+_ACTIVE_TAG_SIZE = 11
+_ACTIVE_VALUE_SIZE = 12
 log = logging.getLogger(__name__)
 
 # Light tints keep the keypad airy; the colored strokes come from generated
@@ -179,19 +185,23 @@ class ScratchRow(tk.Frame):
         if self._suppress:
             return
         raw = self.var.get()
+        try:
+            cursor = self.entry.index(tk.INSERT)
+        except tk.TclError:
+            cursor = len(raw)
         normalized = normalize_text(raw)
-        if normalized != raw:
-            try:
-                cursor = self.entry.index(tk.INSERT)
-            except tk.TclError:
-                cursor = len(normalized)
+        filtered = filter_input(normalized, self.view.base)
+        if filtered != raw:
+            # Drop rejected characters before the caret so mid-string edits
+            # keep the caret next to the text the user just typed.
+            new_cursor = len(filter_input(normalized[:cursor], self.view.base))
             self._suppress = True
             try:
-                self.var.set(normalized)
-                self.entry.icursor(min(cursor, len(normalized)))
+                self.var.set(filtered)
+                self.entry.icursor(min(new_cursor, len(filtered)))
             finally:
                 self._suppress = False
-            raw = normalized
+            raw = filtered
         if self.evaluated_expression is not None and raw != self.evaluated_expression:
             self.clear_result()
         self.view.on_row_text_changed(self)
@@ -277,6 +287,8 @@ class CalculatorView(tk.Frame):
         self._row_height = max(44, metrics_font.metrics("linespace") + 18)
         self._conversion_vars: dict[int, tk.StringVar] = {}
         self._base_tag_labels: dict[int, tk.Label] = {}
+        self._conversion_cells: dict[int, tk.Frame] = {}
+        self._conversion_entries: dict[int, tk.Entry] = {}
         self._scroll_job: str | None = None
         self.bind("<Destroy>", self._on_destroy, add="+")
 
@@ -290,7 +302,7 @@ class CalculatorView(tk.Frame):
         self.add_row(focus=True)
         self._update_digit_states()
         self._refresh_conversion()
-        self.set_status("Enter / = 计算 · 支持 0x / 0b / 0o 前缀")
+        self.set_status(_STATUS_HINT)
 
     def _load_operator_icons(self) -> None:
         for name in ("plus", "minus", "multiply", "divide", "equals"):
@@ -315,7 +327,7 @@ class CalculatorView(tk.Frame):
         ).pack(side="left")
         tk.Label(
             header,
-            text="点击任意层编辑 · Enter 或 = 计算",
+            text="点击任意层编辑 · 输入即自动计算",
             bg=BG,
             fg=MUTED,
             font=self.fonts.u(9),
@@ -382,7 +394,16 @@ class CalculatorView(tk.Frame):
         panel.grid_columnconfigure(0, weight=1, uniform="conv")
         panel.grid_columnconfigure(1, weight=1, uniform="conv")
 
-        for index, base in enumerate(SUPPORTED_BASES):
+        # Reserve the height used by the enlarged active tag so switching
+        # bases doesn't shift the panel (and the keypad below it).
+        probe = tk.Label(panel, font=self.fonts.u(_ACTIVE_TAG_SIZE, "bold"))
+        row_minsize = probe.winfo_reqheight() + 8  # cell grid pady (4 + 4)
+        probe.destroy()
+        panel.grid_rowconfigure(0, minsize=row_minsize)
+        panel.grid_rowconfigure(1, minsize=row_minsize)
+
+        # Grid reading order: BIN DEC / OCT HEX.
+        for index, base in enumerate((2, 10, 8, 16)):
             cell = tk.Frame(panel, bg=PANEL)
             cell.grid(
                 row=index // 2,
@@ -399,7 +420,7 @@ class CalculatorView(tk.Frame):
                 anchor="w",
                 bg=PANEL,
                 fg=MUTED,
-                font=self.fonts.u(9, "bold"),
+                font=self.fonts.u(_INACTIVE_TAG_SIZE),
             )
             tag.grid(row=0, column=0, sticky="w")
             var = tk.StringVar(value="—")
@@ -418,6 +439,8 @@ class CalculatorView(tk.Frame):
             value_entry.grid(row=0, column=1, sticky="ew", padx=(4, 0))
             self._conversion_vars[base] = var
             self._base_tag_labels[base] = tag
+            self._conversion_cells[base] = cell
+            self._conversion_entries[base] = value_entry
             self.bind_wheel(value_entry)
 
     def _build_base_selector(self) -> None:
@@ -430,19 +453,28 @@ class CalculatorView(tk.Frame):
             fg=MUTED,
             font=self.fonts.u(10),
         ).pack(side="left", padx=(0, 8))
-        for base in SUPPORTED_BASES:
+        # Display order only; each button still selects its own base. Chinese
+        # annotations make the abbreviation clear without moving any other UI.
+        base_button_labels = {
+            10: f"{BASE_LABELS[10]} 十进制",
+            8: f"{BASE_LABELS[8]} 八进制",
+            16: f"{BASE_LABELS[16]} 十六进制",
+            2: f"{BASE_LABELS[2]} 二进制",
+        }
+        for base in (2, 8, 16, 10):
             button = FlatButton(
                 row,
-                BASE_LABELS[base],
+                base_button_labels[base],
                 lambda b=base: self.set_base(b),
                 fonts=self.fonts,
                 font_size=10,
-                padx=14,
+                padx=10,
                 pady=6,
             )
             button.pack(side="left", padx=3)
             self._base_buttons[base] = button
         self._base_buttons[10].set_active(True)
+        self._base_buttons[10].configure(font=self.fonts.u(10, "bold"))
 
     def _build_keypad(self) -> None:
         keypad = tk.Frame(self, bg=BG)
@@ -683,7 +715,7 @@ class CalculatorView(tk.Frame):
         if not text.strip():
             return
         try:
-            value = evaluate(text, self.base)
+            value = evaluate_live(text, self.base)
         except ExpressionError as exc:
             row.set_error("错误")
             self.set_status(str(exc), error=True)
@@ -697,16 +729,34 @@ class CalculatorView(tk.Frame):
 
         formatted = format_result(value, self.base)
         row.set_result(value, self.base, formatted)
-        self.set_status("Enter / = 计算 · 支持 0x / 0b / 0o 前缀", error=False)
+        self.set_status(_STATUS_HINT, error=False)
         self.activate_row(row)
         self._refresh_conversion()
         if row is self.rows[-1]:
             self.add_row(focus=True)
 
     def on_row_text_changed(self, row: ScratchRow) -> None:
+        self._update_live_result(row)
         if row is self.active_row:
             self._refresh_conversion()
-        self.set_status("Enter / = 计算 · 支持 0x / 0b / 0o 前缀", error=False)
+        self.set_status(_STATUS_HINT, error=False)
+
+    def _update_live_result(self, row: ScratchRow) -> None:
+        """Mirror the current input into the result label as it is typed.
+
+        Incomplete-but-completable input (``1+``, ``1+2*``) shows the
+        completed value; input that cannot be calculated shows nothing.
+        """
+        text = row.expression
+        if not text.strip():
+            row.clear_result()
+            return
+        try:
+            value = evaluate_live(text, self.base)
+        except Exception:
+            row.clear_result()
+            return
+        row.set_result(value, self.base, format_result(value, self.base))
 
     # ------------------------------------------------------------- editing
     def insert_text(self, text: str) -> None:
@@ -749,8 +799,13 @@ class CalculatorView(tk.Frame):
             return
         self.base = base
         for value, button in self._base_buttons.items():
-            button.set_active(value == base)
+            active = value == base
+            button.set_active(active)
+            button.configure(
+                font=self.fonts.u(10, "bold" if active else "normal")
+            )
         self._update_digit_states()
+        self._update_live_result(self.current_row)
         self._refresh_conversion()
         self.current_row.focus()
 
@@ -782,12 +837,13 @@ class CalculatorView(tk.Frame):
             text = active.expression.strip()
             if (
                 active.result_value is not None
+                and active.result_base == self.base
                 and active.evaluated_expression == active.expression
             ):
                 value = active.result_value
             elif text:
                 try:
-                    value = evaluate(text, self.base)
+                    value = evaluate_live(text, self.base)
                 except Exception:
                     value = None
             else:
@@ -801,10 +857,34 @@ class CalculatorView(tk.Frame):
             if value is not None
             else {base: None for base in SUPPORTED_BASES}
         )
+        # Highlight the whole active cell (not just the tag) so the current
+        # base stands out at a glance.
         for base in SUPPORTED_BASES:
+            active = base == self.base
             item = converted.get(base)
             var = self._conversion_vars.get(base)
             if var is not None:
                 var.set(item if item is not None else "—")
-        for base, tag in self._base_tag_labels.items():
-            tag.configure(fg=ACCENT if base == self.base else MUTED)
+            cell = self._conversion_cells.get(base)
+            if cell is not None:
+                cell.configure(bg=ROW_ACTIVE if active else PANEL)
+            entry = self._conversion_entries.get(base)
+            if entry is not None:
+                entry.configure(
+                    bg=ROW_ACTIVE if active else PANEL,
+                    readonlybackground=ROW_ACTIVE if active else PANEL,
+                    font=self.fonts.m(
+                        _ACTIVE_VALUE_SIZE if active else 11,
+                        "bold" if active else "normal",
+                    ),
+                )
+            tag = self._base_tag_labels.get(base)
+            if tag is not None:
+                tag.configure(
+                    bg=ROW_ACTIVE if active else PANEL,
+                    fg=ACCENT if active else MUTED,
+                    font=self.fonts.u(
+                        _ACTIVE_TAG_SIZE if active else _INACTIVE_TAG_SIZE,
+                        "bold" if active else "normal",
+                    ),
+                )

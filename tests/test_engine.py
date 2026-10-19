@@ -7,6 +7,8 @@ from quicktools.plugins.calculator.engine import (
     ExpressionError,
     convert_bases,
     evaluate,
+    evaluate_live,
+    filter_input,
     format_int,
     format_result,
     normalize_text,
@@ -121,3 +123,62 @@ def test_division_is_true_division() -> None:
     value = evaluate("1/3")
     assert isinstance(value, float)
     assert value == pytest.approx(1 / 3)
+
+
+@pytest.mark.parametrize(
+    ("expression", "expected"),
+    [
+        ("1", 1),
+        ("1+", 1),
+        ("1-", 1),
+        ("1*", 1),
+        ("1/", 1),
+        ("1%", 0),
+        ("1+2*", 3),
+        ("1+2+", 3),
+        ("(1+2)*", 3),
+        ("8/2*", 4),
+        (" 1 + ", 1),
+    ],
+)
+def test_live_evaluation_completes_dangling_operand(
+    expression: str, expected: int | float
+) -> None:
+    assert evaluate_live(expression) == expected
+
+
+@pytest.mark.parametrize(
+    "expression",
+    ["1^", "1**", "1+(1+", "1+(1+2", "1/0", "-", "1*-", ""],
+)
+def test_live_evaluation_rejects_uncalculable_input(expression: str) -> None:
+    with pytest.raises(ExpressionError):
+        evaluate_live(expression)
+
+
+def test_live_evaluation_uses_active_base() -> None:
+    assert evaluate_live("10+", 16) == 16
+    assert evaluate_live("FF*", 16) == 255
+
+
+@pytest.mark.parametrize(
+    ("text", "base", "expected"),
+    [
+        ("12+34", 10, "12+34"),
+        ("12a+34", 10, "12+34"),
+        ("0xFF+1", 10, "0xFF+1"),
+        ("1.25", 10, "1.25"),
+        ("１＋２", 10, "1+2"),
+        ("11+11", 16, "11+11"),
+        ("G+1", 16, "+1"),
+        ("FF+1", 16, "FF+1"),
+        ("1.5G", 16, "15"),
+        ("178+1", 8, "17+1"),
+        ("102", 2, "10"),
+        ("0xFF", 2, "0xFF"),
+    ],
+)
+def test_input_filter_matches_active_base(
+    text: str, base: int, expected: str
+) -> None:
+    assert filter_input(text, base) == expected
