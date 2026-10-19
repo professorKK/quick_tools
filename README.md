@@ -41,14 +41,15 @@ py -3 -m venv .venv
 - 点击插件卡片启动插件。再次点击已打开的插件会聚焦原窗口，不会开第二个相同插件窗口。
 - 启动器隐藏后，全局快捷键依然可用，插件窗口可以继续使用。
 - 状态栏/顶栏有一个 QuickTools 图标。Linux 下点击它弹出原生下拉菜单：第一项“显示”打开启动器，第二项“退出”结束程序。Windows 使用系统托盘的“显示 / 退出”菜单。
-- 设置里可录制新快捷键、打开插件目录、重新扫描插件、退出应用；设置窗口左上角“← 返回启动器”或窗口关闭按钮会回到启动器，Esc 也可返回。
+- 设置里可录制新快捷键、开启/关闭开机启动、打开插件目录、重新扫描插件、退出应用；设置窗口左上角“← 返回启动器”或窗口关闭按钮会回到启动器，Esc 也可返回。
 - Linux 默认值已避开输入法常用的 `Ctrl+Space`。Windows 的 `Ctrl+Space` 若与输入法冲突，也可在设置中改绑（例如 `Ctrl+Alt+Space`）。
 - 命令行控制（需要主实例已在运行）：
 
 ```bash
-./run.sh --show     # 显示启动器
-./run.sh --toggle   # 切换启动器
-./run.sh --quit     # 退出主实例
+./run.sh --show        # 显示启动器
+./run.sh --toggle      # 切换启动器
+./run.sh --background  # 后台启动（登录自启动使用）
+./run.sh --quit        # 退出主实例
 ```
 
 ## Linux 原生状态栏菜单
@@ -255,5 +256,18 @@ Logo 源文件与派生图标统一放在 `quicktools/assets/`，清单见 [asse
 
 会重新生成窗口图标、启动器标题图标、Linux/Windows 状态栏图标和 Windows `.ico`。
 
-- Linux 开机启动：创建 `~/.config/autostart/quicktools.desktop`，`Exec` 指向本项目 `run.sh`，`Terminal=false`。
-- Windows 开机启动：为 `run.bat` 创建快捷方式并放入 `%APPDATA%\Microsoft\Windows\Start Menu\Programs\Startup`。
+## 开机启动
+
+在“设置 → 开机启动”中勾选“登录系统时自动启动 QuickTools（后台运行）”即可。程序会自动识别平台，把当前用户的自启动项写入系统机制，无需 root / 管理员权限：
+
+- **Linux**：XDG Autostart，写入 `$XDG_CONFIG_HOME/autostart/quicktools.desktop`（默认 `~/.config/autostart/quicktools.desktop`）。
+- **Windows**：注册表 `HKCU\Software\Microsoft\Windows\CurrentVersion\Run` 中的 `QuickTools` 值（`REG_SZ`）。
+
+登录后 QuickTools 会在后台静默启动：不弹出启动器，只驻留托盘并注册全局快捷键；如果已有实例运行则静默退出，不会重复启动。取消勾选会删除对应的自启动项。
+
+注意：
+
+- 只作用于当前用户，不做系统级（`/etc/xdg/autostart` 或 `HKLM`）安装。
+- 移动或重装应用后，自启动项可能仍指向旧路径；取消勾选再重新勾选即可刷新。
+- Windows 任务管理器可以独立禁用该启动项；应用内开关只反映注册表中的值。
+- 源码模式下若用 `python.exe` 启动，Windows 登录时可能闪现控制台窗口；打包版或 `pythonw` 不受影响。

@@ -6,7 +6,7 @@ import tkinter as tk
 from tkinter import messagebox
 from typing import TYPE_CHECKING, Callable
 
-from . import __version__, paths
+from . import __version__, autostart, paths
 from .config import HotkeySpec
 from .ui_theme import (
     ACCENT,
@@ -257,7 +257,7 @@ class SettingsWindow(tk.Toplevel):
         self.bind("<Escape>", lambda _event: self.close())
         self.minsize(620, 600)
         self._build()
-        center_on_screen(self, 700, 660)
+        center_on_screen(self, 700, 740)
         self.after(50, self.focus_force)
         self._refresh_plugin_section()
 
@@ -354,6 +354,46 @@ class SettingsWindow(tk.Toplevel):
         ).pack(anchor="w", fill="x", pady=(8, 0))
         self._refresh_hotkey_section()
 
+        autostart_panel = self._panel(shell)
+        autostart_row = tk.Frame(autostart_panel, bg=PANEL)
+        autostart_row.pack(fill="x")
+        tk.Label(
+            autostart_row,
+            text="开机启动",
+            bg=PANEL,
+            fg=TEXT,
+            font=self.fonts.u(11, "bold"),
+        ).pack(side="left")
+        self.autostart_var = tk.BooleanVar(value=False)
+        self.autostart_check = tk.Checkbutton(
+            autostart_row,
+            text="登录系统时自动启动 QuickTools（后台运行）",
+            variable=self.autostart_var,
+            command=self._toggle_autostart,
+            bg=PANEL,
+            fg=TEXT,
+            activebackground=PANEL,
+            activeforeground=TEXT,
+            selectcolor=PANEL,
+            anchor="w",
+            font=self.fonts.u(10),
+            highlightthickness=0,
+            bd=0,
+            cursor="hand2",
+        )
+        self.autostart_check.pack(side="left", padx=(16, 0))
+        self.autostart_hint_var = tk.StringVar()
+        tk.Label(
+            autostart_panel,
+            textvariable=self.autostart_hint_var,
+            bg=PANEL,
+            fg=MUTED,
+            justify="left",
+            anchor="w",
+            wraplength=600,
+            font=self.fonts.u(9),
+        ).pack(anchor="w", fill="x", pady=(4, 0))
+
         plugin_panel = self._panel(shell)
         tk.Label(
             plugin_panel,
@@ -448,6 +488,8 @@ class SettingsWindow(tk.Toplevel):
             pady=7,
         ).pack(side="right")
 
+        self._refresh_autostart_section()
+
     def _refresh_hotkey_section(self) -> None:
         self.hotkey_var.set(self.app.settings.hotkey.display())
         status = self.app.hotkey_status_text()
@@ -470,6 +512,36 @@ class SettingsWindow(tk.Toplevel):
             self.error_text.configure(fg=MUTED)
         self.error_text.configure(state="disabled")
         self._refresh_hotkey_section()
+
+    def _refresh_autostart_section(self) -> None:
+        if not autostart.is_supported():
+            self.autostart_var.set(False)
+            self.autostart_check.configure(state="disabled")
+            self.autostart_hint_var.set("当前平台不支持开机启动。")
+            return
+        try:
+            enabled = autostart.is_enabled()
+        except OSError as exc:
+            self.autostart_var.set(False)
+            self.autostart_check.configure(state="disabled")
+            self.autostart_hint_var.set(f"无法读取开机启动状态：{exc}")
+            return
+        self.autostart_check.configure(state="normal")
+        self.autostart_var.set(enabled)
+        self.autostart_hint_var.set(autostart.mechanism_hint())
+
+    def _toggle_autostart(self) -> None:
+        wanted = bool(self.autostart_var.get())
+        try:
+            if wanted:
+                autostart.enable()
+            else:
+                autostart.disable()
+        except (OSError, RuntimeError) as exc:
+            self.autostart_var.set(not wanted)
+            messagebox.showerror("开机启动设置失败", str(exc), parent=self)
+            return
+        self._refresh_autostart_section()
 
     def _record_hotkey(self) -> None:
         HotkeyRecorder(self, self.app, self.fonts, on_done=self._refresh_hotkey_section)

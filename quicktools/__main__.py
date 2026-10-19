@@ -20,9 +20,15 @@ def build_parser() -> argparse.ArgumentParser:
         prog="quicktools",
         description=f"{DISPLAY_NAME}：全局快捷键唤出的 Tkinter 插件启动器",
     )
-    parser.add_argument("--toggle", action="store_true", help="切换启动器显示状态")
-    parser.add_argument("--show", action="store_true", help="显示启动器")
-    parser.add_argument("--quit", action="store_true", help="退出已运行的实例")
+    commands = parser.add_mutually_exclusive_group()
+    commands.add_argument("--toggle", action="store_true", help="切换启动器显示状态")
+    commands.add_argument("--show", action="store_true", help="显示启动器")
+    commands.add_argument("--quit", action="store_true", help="退出已运行的实例")
+    commands.add_argument(
+        "--background",
+        action="store_true",
+        help="后台启动（登录自启动使用；已有实例时静默退出）",
+    )
     parser.add_argument(
         "--tray-helper", action="store_true", help=argparse.SUPPRESS
     )
@@ -40,7 +46,14 @@ def main(argv: list[str] | None = None) -> int:
 
         return run_tray_helper()
 
-    if args.toggle or args.show or args.quit:
+    start_visible = True
+    if args.background:
+        # Login autostart: never surface the launcher. "ping" is answered
+        # directly by the IPC server, so it does not trigger any UI.
+        if send_command("ping"):
+            return 0
+        start_visible = False
+    elif args.toggle or args.show or args.quit:
         command = "toggle" if args.toggle else ("show" if args.show else "quit")
         if send_command(command):
             return 0
@@ -54,7 +67,7 @@ def main(argv: list[str] | None = None) -> int:
             return 0
 
     try:
-        app = QuickToolsApp(start_visible=True)
+        app = QuickToolsApp(start_visible=start_visible)
         app.run()
         return 0
     except Exception as exc:

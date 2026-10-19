@@ -191,6 +191,10 @@ class QuickToolsApp:
             self.settings_window.deiconify()
             self.settings_window.lift()
             self.settings_window.focus_force()
+            try:
+                self.settings_window._refresh_autostart_section()
+            except tk.TclError:
+                pass
             return
         self._restore_launcher_after_settings = self.launcher.window.winfo_viewable()
         if self._restore_launcher_after_settings:
