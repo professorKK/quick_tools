@@ -1,0 +1,272 @@
+"""Application lifecycle, command routing and global state."""
+
+from __future__ import annotations
+
+import queue
+import tkinter as tk
+from tkinter import messagebox
+
+from . import paths
+from .config import AppSettings, HotkeySpec, load_settings, save_settings
+from .hotkey import HotkeyManager
+from .ipc import IpcServer
+from .launcher import Launcher
+from .logging_setup import get_logger
+from .plugin_loader import PluginLoader
+from .settings_ui import SettingsWindow
+from .tray import TrayController
+from .ui_theme import enable_high_dpi
+
+log = get_logger(__name__)
+
+
+class QuickToolsApp:
+    def __init__(self, start_visible: bool = True) -> None:
+        enable_high_dpi()
+        paths.ensure_app_dirs()
+        self._shutting_down = False
+        self._hotkey_capturing = False
+        self.show_error_dialogs = True
+
+        self.root = tk.Tk()
+        self.root.withdraw()
+        self.root.title("快捷工具")
+        self.root.report_callback_exception = self._report_callback_exception
+        self._app_icon_image = None
+        self._load_window_icon()
+
+        self.commands: queue.Queue[str] = queue.Queue()
+        self.settings: AppSettings = load_settings()
+        self.loader = PluginLoader(paths.user_plugins_dir(), paths.builtin_plugins_dir())
+        self.hotkey = HotkeyManager(
+            self.settings.hotkey, lambda: self.commands.put("toggle")
+        )
+        self.settings_window: SettingsWindow | None = None
+        self._poll_job: str | None = None
+        self._restore_launcher_after_settings = False
+
+        self.launcher = Launcher(self, self.root)
+        self.hotkey.start()
+        self.ipc = IpcServer(self._enqueue_command)
+        self.ipc.start()
+        self.tray = TrayController()
+        self.tray.start()
+        self._refresh_status_ui()
+
+        self._poll_job = self.root.after(50, self._drain_commands)
+        if start_visible:
+            self.launcher.show()
+
+    def _load_window_icon(self) -> None:
+        try:
+            image = tk.PhotoImage(
+                master=self.root, file=str(paths.assets_dir() / "icon.png")
+            )
+            self.root.iconphoto(True, image)
+            self._app_icon_image = image
+        except Exception as exc:
+            log.warning("应用图标加载失败：%s", exc)
+
+    def apply_window_icon(self, window: tk.Toplevel) -> None:
+        if self._app_icon_image is None:
+            return
+        try:
+            window.iconphoto(False, self._app_icon_image)
+        except tk.TclError:
+            log.debug("窗口图标设置失败", exc_info=True)
+
+    # ------------------------------------------------------------- commands
+    def _enqueue_command(self, command: str) -> None:
+        self.commands.put(command)
+
+    def _drain_commands(self) -> None:
+        self._poll_job = None
+        if self._shutting_down:
+            return
+        handled = 0
+        while handled < 10:
+            try:
+                command = self.commands.get_nowait()
+            except queue.Empty:
+                break
+            handled += 1
+            log.info("处理命令：%s", command)
+            if command == "toggle":
+                self.launcher.toggle()
+            elif command == "show":
+                self.launcher.show()
+            elif command == "settings":
+                self.open_settings()
+            elif command.startswith("menu "):
+                parts = command.split()
+                try:
+                    x, y = int(parts[1]), int(parts[2])
+                except (IndexError, ValueError):
+                    x, y = -1, -1
+                self.launcher.show_tray_menu(x, y)
+            elif command == "quit":
+                self.quit()
+                return
+        self._poll_job = self.root.after(50, self._drain_commands)
+
+    def run(self) -> None:
+        try:
+            self.root.mainloop()
+        finally:
+            if not self._shutting_down:
+                self._cleanup()
+
+    # -------------------------------------------------------------- hotkey
+    def begin_hotkey_capture(self) -> None:
+        if self._hotkey_capturing:
+            return
+        self._hotkey_capturing = True
+        self.hotkey.suspend()
+        self._refresh_status_ui()
+
+    def cancel_hotkey_capture(self) -> None:
+        if not self._hotkey_capturing:
+            return
+        self._hotkey_capturing = False
+        self.hotkey.resume()
+        self._refresh_status_ui()
+
+    def set_hotkey(self, new_spec: HotkeySpec) -> tuple[bool, str]:
+        old_settings = self.settings
+        ok, message = self.hotkey.change(new_spec)
+        if not ok:
+            self._hotkey_capturing = False
+            self._refresh_status_ui()
+            return False, message
+
+        new_settings = AppSettings(hotkey=new_spec)
+        try:
+            save_settings(new_settings)
+        except Exception as exc:
+            log.exception("保存快捷键设置失败")
+            self.hotkey.change(old_settings.hotkey)
+            self.settings = old_settings
+            self._hotkey_capturing = False
+            self._refresh_status_ui()
+            return False, f"保存设置失败：{exc}"
+
+        self.settings = new_settings
+        self._hotkey_capturing = False
+        self._refresh_status_ui()
+        return True, ""
+
+    def hotkey_status_text(self) -> str:
+        if self._hotkey_capturing:
+            return "正在录制快捷键…"
+        return self.hotkey.status_text()
+
+    def hotkey_status_warning(self) -> bool:
+        return not self.hotkey.running
+
+    def _refresh_status_ui(self) -> None:
+        try:
+            self.launcher.update_hotkey_status(
+                self.hotkey_status_text(), self.hotkey_status_warning()
+            )
+        except tk.TclError:
+            pass
+        window = self.settings_window
+        if window is not None and self._window_exists(window):
+            try:
+                window._refresh_hotkey_section()
+            except tk.TclError:
+                pass
+
+    # -------------------------------------------------------------- plugins
+    def reload_plugins(self) -> tuple[int, list[str]]:
+        count, errors = self.launcher.reload_plugins()
+        self._refresh_status_ui()
+        return count, errors
+
+    # ------------------------------------------------------------- settings
+    def open_settings(self) -> None:
+        if self.settings_window is not None and self._window_exists(
+            self.settings_window
+        ):
+            self.settings_window.deiconify()
+            self.settings_window.lift()
+            self.settings_window.focus_force()
+            return
+        self._restore_launcher_after_settings = self.launcher.window.winfo_viewable()
+        if self._restore_launcher_after_settings:
+            self.launcher.hide()
+        try:
+            self.settings_window = SettingsWindow(self, self.root)
+            self.apply_window_icon(self.settings_window)
+        except Exception:
+            if self._restore_launcher_after_settings:
+                self.launcher.show()
+            raise
+
+    def settings_closed(self, window: SettingsWindow) -> None:
+        if self.settings_window is window:
+            self.settings_window = None
+        if self._restore_launcher_after_settings and not self._shutting_down:
+            self._restore_launcher_after_settings = False
+            self.launcher.show()
+
+    def _window_exists(self, window: tk.Misc) -> bool:
+        try:
+            return bool(window.winfo_exists())
+        except tk.TclError:
+            return False
+
+    # ----------------------------------------------------------- exceptions
+    def _report_callback_exception(self, exc, val, tb) -> None:
+        log.error("Tk 回调异常", exc_info=(exc, val, tb))
+        if not self.show_error_dialogs or self._shutting_down:
+            return
+        try:
+            messagebox.showerror(
+                "快捷工具错误",
+                f"{exc.__name__}: {val}\n\n详细信息已写入：\n{paths.log_file()}",
+                parent=self.root,
+            )
+        except Exception:
+            pass
+
+    # --------------------------------------------------------------- shutdown
+    def quit(self) -> None:
+        if self._shutting_down:
+            return
+        self._shutting_down = True
+        log.info("快捷工具正在退出")
+        if self._poll_job is not None:
+            try:
+                self.root.after_cancel(self._poll_job)
+            except tk.TclError:
+                pass
+            self._poll_job = None
+        self._cleanup()
+        try:
+            self.root.quit()
+        except tk.TclError:
+            pass
+        try:
+            self.root.destroy()
+        except tk.TclError:
+            pass
+
+    def _cleanup(self) -> None:
+        self._shutting_down = True
+        try:
+            self.launcher.stop_background_plugins()
+        except Exception:
+            log.exception("停止后台插件失败")
+        try:
+            self.tray.stop()
+        except Exception:
+            log.exception("停止状态栏图标失败")
+        try:
+            self.hotkey.stop()
+        except Exception:
+            log.exception("停止全局快捷键失败")
+        try:
+            self.ipc.stop()
+        except Exception:
+            log.exception("停止 IPC 失败")

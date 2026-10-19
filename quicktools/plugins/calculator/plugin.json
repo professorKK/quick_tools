@@ -1,0 +1,11 @@
+{
+  "api_version": 1,
+  "id": "calculator",
+  "name": "计算器",
+  "description": "草稿纸式表达式计算，支持鼠标定点修改与 DEC/HEX/OCT/BIN 进制转换。",
+  "version": "1.0.0",
+  "entry": "plugin.py",
+  "class": "CalculatorPlugin",
+  "icon": "=",
+  "order": 10
+}
