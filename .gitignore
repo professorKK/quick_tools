@@ -5,7 +5,10 @@ __pycache__/
 .pytest_cache/
 .ruff_cache/
 
-# 打包相关
+# Claude Code 本地设置（含本机权限配置，每台机器不同）
+.claude/settings.local.json
+
+# 打包相关（dist/ 按平台分目录：dist/win、dist/linux；中间文件在 build/ 下）
 *.egg-info/
 build/
 dist/
@@ -16,4 +19,5 @@ dist/
 # 可执行文件
 *.spec
 !QuickTools.spec
+!QuickTools-onefile.spec
 *.exe

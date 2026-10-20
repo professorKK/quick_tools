@@ -43,16 +43,20 @@ DISPLAY=:0 PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 \
 # 重新生成图标资源
 .venv/bin/python scripts/prepare_assets.py
 
-# 打包（PyInstaller，产出 dist/QuickTools/）
-./build_linux.sh
-build_windows.bat
+# 打包（PyInstaller；产物按平台分目录：dist/win/、dist/linux/）
+./build_linux.sh                           # Linux 目录版 → dist/linux/QuickTools/QuickTools
+build_windows.bat                          # Windows 目录版 → dist\win\QuickTools\QuickTools.exe
+build_all.bat                              # Windows：目录版 + 单文件版 + 安装包（Inno Setup 缺失时跳过）
+.venv/Scripts/python -m PyInstaller --noconfirm --distpath dist\win --workpath build\win_onefile QuickTools-onefile.spec
 ```
 
 - `PYTEST_DISABLE_PLUGIN_AUTOLOAD=1` 用于避开系统 ROS 注入的 pytest 插件；干净环境可省略。
 - `DISPLAY` 是 Tk 冒烟测试必需的；没有显示环境时相关测试会自动 skip。
 - 未配置 lint/format 检查步骤，`pyproject.toml` 只配置了 pytest。
-- 打包必须使用项目的 `QuickTools.spec`；Windows 包只能在 Windows 上构建。
-- 仓库提交信息格式为 `YYMMDD: 描述`（如 `261019: 新增加了开机自启动开关`）；`./git-update.sh 描述` 会按此格式执行 `git add .` 并提交。仅在用户明确要求提交时使用。
+- 打包必须使用项目的 `QuickTools.spec`（目录版）或 `QuickTools-onefile.spec`（单文件版）；Windows 包只能在 Windows 上构建。单文件版会把依赖解压到临时目录，冷启动约 3 秒；目录版约 1 秒。`installer.iss` 用 Inno Setup 6 把 `dist/win/QuickTools` 打成 `dist/win/QuickTools-Setup.exe`，由 `build_all.bat` 自动调用。
+- **产物目录**：分发产物统一放在 `dist/` 下按平台分目录——`dist/win/`（`QuickTools/` 目录版、`QuickTools.exe` 单文件版、`QuickTools-Setup.exe` 安装包）和 `dist/linux/`（`QuickTools/`）；中间文件在 `build/win/`、`build/win_onefile/`、`build/linux/`。`dist/` 和 `build/` 整体被 `.gitignore` 忽略，不要在 `dist/` 里放中间文件。
+- **换行符**：`.gitattributes` 规定 `*.bat`/`*.iss` 为 CRLF、`*.sh` 为 LF。cmd.exe 不支持 LF 换行的批处理——会把整个文件当成一条命令，注释与下一条命令拼接后报错。新增 Windows 脚本必须保持 CRLF。
+- 仓库提交信息格式为 `YYMMDD: 描述`（如 `261019: 新增加了开机自启动开关`）；`./git-update.sh 描述`（Linux/Git Bash）或 `git-update.bat 描述`（Windows cmd/PowerShell，转调同一个 .sh）会按此格式执行 `git add .` 并提交；两个脚本都会先切到仓库根目录，从子目录调用也不会漏提交。仅在用户明确要求提交时使用。
 
 ## 运行时架构
 
@@ -102,7 +106,7 @@ build_windows.bat
 - 当前进度：核心动作链路、X11/Windows 矩形/窗口/自由/滚动截图、冻结画面选区、标注编辑窗口、最近截图库（搜索/筛选/收藏）、插件设置和截图快捷键已完成；控制窗口采用左侧导航（首页/关于/设置）+ 可点击模式卡，编辑器使用图标工具条。Wayland 通过 portal 支持区域/窗口截图，自由截图走“全屏 + 编辑器套索裁剪”，滚动截图不支持。Wayland 仍需实机验收。
 - `plugin.py`：动作白名单为 `open`、`capture_region`、`capture_window`、`capture_freeform`、`capture_scroll`；`_hotkey_managers` 同时注册主快捷键和 `shortcuts.py` 中固定的 `Ctrl+Alt+1~4` 模式快捷键，单个注册失败不影响其他项；所有快捷键只通过 `context.actions.post_action()` 投递动作，不在 pynput 线程直接操作 Tk。
 - `shortcuts.py`：`MODE_HOTKEYS` 是模式快捷键与卡片徽标的唯一来源，避免 UI 与注册逻辑漂移。
-- `service.py`：负责隐藏窗口 → 抓屏 → 选区 → 编辑器 → 自动保存/复制/另存为/最近库的完整状态机；所有 Tk 操作在主线程，`stop_service()` 必须取消 after、销毁 overlay/editor、恢复窗口。`_autosave_image()` 把编辑器改动写入最近记录（`update_png` 同步原图和缩略图），并在该记录已有 `saved_path` 时覆盖对应文件。普通关闭丢弃 `_restore` 并调用 `actions.hide_windows()`，确保从最近截图打开编辑器等场景也不留下可见窗口；`_editor_closed(return_to_assistant=True)` 必须先 `_restore_windows()` 再 `actions.open_window()` 并调用 `_notify_recent_changed()`，以恢复并聚焦截图助手、强制刷新最近截图列表（窗口一直可见时不会触发 `<Map>`）。
+- `service.py`：负责隐藏窗口 → 抓屏 → 选区 → 编辑器 → 自动保存/复制/另存为/最近库的完整状态机；所有 Tk 操作在主线程，`stop_service()` 必须取消 after、销毁 overlay/editor、恢复窗口。`_autosave_image()` 把编辑器改动写入最近记录（`update_png` 同步原图和缩略图），并在该记录已有 `saved_path` 时覆盖对应文件。**关闭即保留**：`_editor_closed()` 不删除新截图记录，因为打开编辑器时原图已入库、改动由自动保存落库（以前“没动过就关闭”会删记录的逻辑已移除，不要加回来）。普通关闭丢弃 `_restore` 并调用 `actions.hide_windows()`，确保从最近截图打开编辑器等场景也不留下可见窗口；`_editor_closed(return_to_assistant=True)` 必须先 `_restore_windows()` 再 `actions.open_window()` 并调用 `_notify_recent_changed()`，以恢复并聚焦截图助手、强制刷新最近截图列表（窗口一直可见时不会触发 `<Map>`）。
 - `capture/`：`x11.py` 用 python-xlib 抓根窗口并通过 XRandR 枚举显示器；`windows.py` 用 Pillow ImageGrab + ctypes 虚拟屏幕/窗口枚举；`wayland.py` 通过 `portal.py`（jeepney）调用 `org.freedesktop.portal.Screenshot`，区域/窗口用交互选择器，自由截图用非交互全屏后由编辑器套索裁剪；**Wayland 不做 X11 回退**。滚动截图只支持 Windows/X11。
 - `scroll/`：`stitcher.py` 用纯 Pillow 做缩小灰度重叠检测和纵向拼接（`ImageChops`/`ImageStat`，不引入 numpy/OpenCV）；`controller.py` 在 worker 线程用新采集后端执行滚动/抓帧，通过队列回到主线程控制条。X11 用 XTest 滚轮，Windows 用 `SendInput`；Wayland capabilities 中 `scrolling=False`。滚动截图是 best-effort，低置信度时停止而不是拼垃圾。
 - `selection/overlay.py`：显示器级冻结画面覆盖层；矩形拖拽、窗口高亮点击、自由套索三种模式。窗口模式在 X11/Windows 上用后端枚举窗口，被遮挡时由 service 抬升并重新抓屏；自由套索用 `editor/mask.py` 生成抗锯齿透明边缘。
@@ -115,7 +119,7 @@ build_windows.bat
 - `recent/store.py`：SQLite WAL + `images/`/`thumbs/`，参考剪贴板 store 的原子写入、缩略图、路径包含校验和裁剪策略。`shots` 表含 `favorite` 列；启动时用 `PRAGMA table_info` 幂等迁移旧库（`ALTER TABLE`），`PRAGMA user_version=2`。`list()` 支持 `favorite`/`mode` 筛选，`set_favorite()`/`toggle_favorite()` 不修改 `updated_at`。
 - `ui/control_window.py` + `ui/home_page.py` + `ui/about_page.py` + `ui/recent_view.py`：控制窗口为左侧导航（首页/关于/设置）+ 右侧页面容器；页面容器行 `weight=1`，页脚和状态行固定。首页包含可点击模式卡和最近截图区，最近截图行是 HomePage 中唯一 `weight=1` 的行。关于页读取 `plugin.json` 版本并展示能力、快捷键和文件位置。最近截图使用 `ui/widgets.py` 的 `ScrollableFrame`、`PlaceholderEntry`、`ActionLink`、`FilterMenu` 和 `ColorSwatch`；搜索与筛选叠加，复制/收藏等操作用 toast 反馈。
 - `ui/icons.py`：Pillow 在 24×24 逻辑网格上绘制图标并 4 倍超采样；`IconSet` 按 `(名称, 像素尺寸, 颜色)` 缓存 `ImageTk.PhotoImage`，并在宿主 `<Destroy>` 时清空。**所有 PhotoImage 必须由 IconSet 或控件属性持有，且只能在 Tk 主线程创建**。Tk 不支持圆角容器，圆角只用于 Pillow 生成的图标底板/装饰卡。
-- `editor/editor_window.py`：工具栏使用 `IconSet` 的图标在上、文字在下布局；复制成功后显示右下角 toast 并短暂把复制按钮改为“已复制 ✓”；另存为/`Ctrl+S` 也显示 toast。**底部不再有“保存”按钮**；文档修改后经 `AUTOSAVE_DELAY_MS`（400ms）防抖调用 `on_autosave`，`_request_close()` 必须先 `_flush_autosave()`，确保关闭前的最后一次修改已落库；`_autosave()` 成功后将 `_done=True` 并 `mark_exported()`。所有 after 任务（含 `_autosave_job`）在关闭时取消。**必须保留 `_copy_button` 文字闪烁为精确的“已复制 ✓”、`_close_return_button` 文本精确为“关闭并返回”、`_zoom_var` 的 `缩放 N%` 格式、`toolbar.width_var`/`font_size_var` 和 `toolbar._redo_or_reset`**，现有 UI 测试依赖这些契约。`close_and_return()` 通过可选 `on_return` 回调通知 service；`close()`、标题栏 X 和 `Esc` 仍走 `on_close`。关闭确认基于 `document.content_signature()` 与 `mark_exported()` 记录的基线比较：`require_action_on_close=True`（新截图）时未导出也会确认，`False`（最近截图）时仅在有未保存修改时确认；`copy()`/`save()`/`save_as()`/自动保存成功后必须调用 `mark_exported()`。
+- `editor/editor_window.py`：工具栏使用 `IconSet` 的图标在上、文字在下布局；复制成功后显示右下角 toast 并短暂把复制按钮改为“已复制 ✓”；另存为/`Ctrl+S` 也显示 toast。**底部不再有“保存”按钮**；文档修改后经 `AUTOSAVE_DELAY_MS`（400ms）防抖调用 `on_autosave`。`_request_close()` 先 `commit_pending_entry()`，再在 `content_signature()` 与基线不一致时调用 `_flush_autosave()` 立即落库，落库成功后 `mark_exported()` 前移基线，因此正常关闭不会弹确认；只有自动保存失败等确实未落库的情况才基于 `document.content_signature()` 与 `mark_exported()` 基线比较弹出确认。**不存在“新截图必须复制或保存”这条规则**（原 `require_action_on_close` 已移除，不要加回来）。`_autosave()` 成功后设置 `_done=True` 并 `mark_exported()`。所有 after 任务（含 `_autosave_job`）在关闭时取消。**必须保留 `_copy_button` 文字闪烁为精确的“已复制 ✓”、`_close_return_button` 文本精确为“关闭并返回”、`_zoom_var` 的 `缩放 N%` 格式、`toolbar.width_var`/`font_size_var` 和 `toolbar._redo_or_reset`**，现有 UI 测试依赖这些契约。`close_and_return()` 通过可选 `on_return` 回调通知 service；`close()`、标题栏 X 和 `Esc` 仍走 `on_close`。`copy()`/`save()`/`save_as()`/自动保存成功后必须调用 `mark_exported()`。
 - 复制图片走 `context.actions.copy_png_to_clipboard(png)`，由 launcher 转给剪贴板插件的 `copy_image_png()`；**不要从截图插件 import 剪贴板插件模块**，否则会生成重复模块树和后端实例。
 - 选区覆盖鼠标所在显示器；V1 不做跨显示器拖拽。Windows 混合 DPI 多屏仅做了 Win32 负坐标定位兜底，仍需实机验收。
 - 新增采集/portal 依赖时，同步更新 `QuickTools.spec` hiddenimports、`pyproject.toml` 和 `requirements.txt`。

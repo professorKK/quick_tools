@@ -256,7 +256,6 @@ def test_editor_close_without_edits_skips_confirm(
         on_copy=lambda _image: None,
         on_save=lambda _image, _path: None,
         on_close=closed.append,
-        require_action_on_close=False,
     )
     editor.withdraw()
     root.update()
@@ -287,7 +286,6 @@ def test_editor_close_with_edits_confirms(root: tk.Tk, monkeypatch) -> None:
         on_copy=lambda _image: None,
         on_save=lambda _image, _path: None,
         on_close=closed.append,
-        require_action_on_close=False,
     )
     editor.withdraw()
     root.update()
@@ -305,7 +303,7 @@ def test_editor_close_with_edits_confirms(root: tk.Tk, monkeypatch) -> None:
     assert len(calls) == 2
 
 
-def test_editor_fresh_capture_without_export_confirms(
+def test_editor_fresh_capture_without_export_closes_silently(
     root: tk.Tk, monkeypatch
 ) -> None:
     calls: list[str] = []
@@ -321,14 +319,72 @@ def test_editor_fresh_capture_without_export_confirms(
         on_copy=lambda _image: None,
         on_save=lambda _image, _path: None,
         on_close=closed.append,
+        on_autosave=lambda _image: None,
     )
     editor.withdraw()
     root.update()
 
     editor.close()
     root.update()
+    assert calls == []
     assert closed == [False]
-    assert calls and "还没有复制或保存" in calls[0]
+
+
+def test_editor_new_capture_flushes_autosave_on_close(root: tk.Tk) -> None:
+    autosaved: list[Image.Image] = []
+    closed: list[bool] = []
+    editor = CaptureEditor(
+        root,
+        Image.new("RGB", (120, 80), "white"),
+        ScreenshotSettings(),
+        on_copy=lambda _image: None,
+        on_save=lambda _image, _path: None,
+        on_close=closed.append,
+        on_autosave=autosaved.append,
+    )
+    editor.withdraw()
+    root.update()
+
+    editor.document.add_number(Point(10, 10), editor.edit_style)
+    editor._on_document_changed()
+    assert editor._autosave_job is not None
+
+    # 新截图直接关闭：先把防抖中的改动落库，再静默关闭。
+    editor.close()
+    root.update()
+    assert len(autosaved) == 1
+    assert closed == [True]
+
+
+def test_editor_failed_autosave_still_confirms(root: tk.Tk, monkeypatch) -> None:
+    calls: list[str] = []
+
+    def failing_autosave(_image: Image.Image) -> None:
+        raise OSError("磁盘已满")
+
+    monkeypatch.setattr(
+        "quicktools.plugins.screenshot.editor.editor_window.messagebox.askyesno",
+        lambda title, message, **kwargs: calls.append(message) or False,
+    )
+    closed: list[bool] = []
+    editor = CaptureEditor(
+        root,
+        Image.new("RGB", (120, 80), "white"),
+        ScreenshotSettings(),
+        on_copy=lambda _image: None,
+        on_save=lambda _image, _path: None,
+        on_close=closed.append,
+        on_autosave=failing_autosave,
+    )
+    editor.withdraw()
+    root.update()
+
+    editor.document.add_number(Point(10, 10), editor.edit_style)
+    editor.close()
+    root.update()
+    assert closed == []
+    assert editor.winfo_exists()
+    assert calls and "未保存的修改" in calls[0]
 
 
 def test_editor_draws_hollow_shapes(root: tk.Tk) -> None:

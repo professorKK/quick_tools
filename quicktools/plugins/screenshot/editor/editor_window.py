@@ -58,7 +58,6 @@ class CaptureEditor(tk.Toplevel):
         on_close: CloseHandler,
         on_return: ReturnHandler | None = None,
         on_autosave: AutoSaveHandler | None = None,
-        require_action_on_close: bool = True,
         initial_tool: Tool | None = None,
     ) -> None:
         super().__init__(root)
@@ -69,7 +68,6 @@ class CaptureEditor(tk.Toplevel):
         self.on_autosave = on_autosave
         self.on_close = on_close
         self.on_return = on_return
-        self.require_action_on_close = require_action_on_close
         self.fonts = pick_fonts(self)
         self.icons = IconSet(self)
         self.font_resolver = FontResolver()
@@ -567,18 +565,15 @@ class CaptureEditor(tk.Toplevel):
         if self._closed:
             return
         self._canvas.commit_pending_entry()
-        self._flush_autosave()
+        # 自动保存成功后 mark_exported() 会把基线前移，正常关闭就不会命中。
         modified = self.document.content_signature() != self._clean_signature
-        needs_confirm = modified or (
-            self.require_action_on_close and not self._done
-        )
-        if needs_confirm:
+        if modified and self.on_autosave is not None:
+            # 还没到防抖时间的改动先落库，失败时靠下面的确认提示兜底。
+            self._flush_autosave()
+            modified = self.document.content_signature() != self._clean_signature
+        if modified:
             self._release_stale_grab()
-            reason = (
-                "这张截图还有未保存的修改"
-                if modified
-                else "这张截图还没有复制或保存"
-            )
+            reason = "这张截图还有未保存的修改"
             if return_to_assistant:
                 title = "关闭截图并返回"
                 message = f"{reason}，确定关闭并返回截图助手吗？"

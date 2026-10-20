@@ -1,0 +1,13 @@
+# 换行符策略
+# cmd.exe 不支持 LF 换行的批处理：整个文件会被当成一条命令解析，
+# 注释会和下一条命令拼在一起执行。Windows 脚本必须保持 CRLF。
+*.bat text eol=crlf
+*.iss text eol=crlf
+
+# Shell 脚本必须保持 LF，否则 Linux 上会报 bad interpreter。
+*.sh text eol=lf
+
+# 二进制资源不做换行转换。
+*.png binary
+*.ico binary
+*.db binary

@@ -1,11 +1,13 @@
 @echo off
 REM ==========================================================================
-REM QuickTools Windows 打包脚本
+REM QuickTools Windows 打包脚本（仅目录版）
 REM
 REM 作用：用 PyInstaller 把项目打包成独立的目录版程序，目标电脑不需要安装
 REM       Python 也能运行。
-REM 产物：dist\QuickTools\QuickTools.exe
-REM       分发时要整个 dist\QuickTools 文件夹一起拷贝。
+REM 产物：dist\win\QuickTools\QuickTools.exe
+REM       （按平台分目录，和 Linux 的 dist\linux\ 互不干扰）
+REM       分发时要整个 dist\win\QuickTools 文件夹一起拷贝。
+REM 需要单文件版和安装包时，请改用 build_all.bat。
 REM 用法：双击本文件，或在命令行执行 build_windows.bat
 REM ==========================================================================
 
@@ -29,6 +31,14 @@ if not exist ".venv\Scripts\python.exe" (
 REM 启用虚拟环境，这样后面安装和打包都只用项目自己的 Python。
 call ".venv\Scripts\activate.bat"
 
+REM 如果 QuickTools.exe 正在运行，PyInstaller 会因为文件被占用而失败，
+REM 这里提前检查并给出明确提示，而不是让用户看一堆 PermissionError。
+tasklist /fi "IMAGENAME eq QuickTools.exe" 2>nul | findstr /i "QuickTools.exe" >nul
+if not errorlevel 1 (
+  echo 检测到 QuickTools.exe 正在运行，请先从状态栏菜单退出程序后再打包。
+  exit /b 1
+)
+
 REM 安装项目本身、测试依赖和 PyInstaller。
 REM   -e ".[dev]"  本项目（可编辑安装，附带测试依赖）
 REM   pyinstaller  打包工具
@@ -36,11 +46,15 @@ python -m pip install -e ".[dev]" pyinstaller
 if errorlevel 1 exit /b 1
 
 REM 按照 QuickTools.spec 的配置打包。
+REM 用 python -m PyInstaller 而不是直接调用 pyinstaller，
+REM 确保用的是当前虚拟环境里的打包工具。
 REM --noconfirm：如果已有旧产物，直接覆盖，不再询问。
-pyinstaller --noconfirm QuickTools.spec
+REM --distpath/--workpath：产物放进 dist\win\，中间文件放进 build\win\，
+REM 和 Linux 的 dist\linux\、build\linux\ 互不干扰。
+python -m PyInstaller --noconfirm --distpath dist\win --workpath build\win QuickTools.spec
 if errorlevel 1 exit /b 1
 
 REM 提示最终可执行文件的位置。
 echo.
-echo Windows 打包完成：%CD%\dist\QuickTools\QuickTools.exe
+echo Windows 打包完成：%CD%\dist\win\QuickTools\QuickTools.exe
 endlocal

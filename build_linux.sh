@@ -4,8 +4,9 @@
 #
 # 作用：用 PyInstaller 把项目打包成独立的目录版程序，目标机器不需要安装
 #       Python 也能运行。
-# 产物：dist/QuickTools/QuickTools
-#       分发时要整个 dist/QuickTools 文件夹一起拷贝。
+# 产物：dist/linux/QuickTools/QuickTools
+#       （按平台分目录，和 Windows 的 dist/win/ 互不干扰）
+#       分发时要整个 dist/linux/QuickTools 文件夹一起拷贝。
 # 用法：在任意目录执行  ./build_linux.sh
 # ============================================================================
 
@@ -29,8 +30,11 @@ fi
 
 # 按照 QuickTools.spec 的配置打包。
 # --noconfirm：如果已有旧产物，直接覆盖，不再询问。
-.venv/bin/pyinstaller --noconfirm QuickTools.spec
+# --distpath/--workpath：产物放进 dist/linux/，中间文件放进 build/linux/，
+# 和 Windows 的 dist/win/、build/win/ 互不干扰。
+.venv/bin/python -m PyInstaller --noconfirm \
+  --distpath dist/linux --workpath build/linux QuickTools.spec
 
 # 告诉用户最终可执行文件在哪里。
 echo
-echo "Linux 打包完成：$(pwd)/dist/QuickTools/QuickTools"
+echo "Linux 打包完成：$(pwd)/dist/linux/QuickTools/QuickTools"

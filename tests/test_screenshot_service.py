@@ -145,7 +145,6 @@ class FakeEditor:
         on_close,
         on_return=None,
         on_autosave=None,
-        require_action_on_close=True,
         initial_tool=None,
         **_kwargs,
     ) -> None:
@@ -155,7 +154,6 @@ class FakeEditor:
         self.on_autosave = on_autosave
         self.on_close = on_close
         self.on_return = on_return
-        self.require_action_on_close = require_action_on_close
         self.initial_tool = initial_tool
         self.disposed = False
         FakeEditor.instances.append(self)
@@ -272,7 +270,7 @@ def test_region_capture_copy_and_close(monkeypatch, tmp_path: Path) -> None:
         assert len(service.recent_entries()) == 1
         assert FakeEditor.instances
         editor = FakeEditor.instances[-1]
-        assert editor.require_action_on_close is True
+        assert editor.on_autosave is not None
 
         editor.on_copy(image)
         assert actions.clips
@@ -365,7 +363,7 @@ def test_editor_autosave_overwrites_saved_file(
         service.stop()
 
 
-def test_editor_close_and_return_without_action_removes_new_recent(
+def test_editor_close_and_return_without_action_keeps_new_recent(
     monkeypatch, tmp_path: Path
 ) -> None:
     service, root, _backend, actions = setup_service(monkeypatch, tmp_path)
@@ -377,7 +375,7 @@ def test_editor_close_and_return_without_action_removes_new_recent(
         assert len(service.recent_entries()) == 1
 
         FakeEditor.instances[-1].on_return(False)
-        assert service.recent_entries() == []
+        assert len(service.recent_entries()) == 1
         assert not service._busy
         assert actions.restore_calls == 1
         assert actions.open_calls == 1
@@ -401,7 +399,7 @@ def test_open_recent_close_and_return_focuses_assistant(
         service.open_recent(entry)
         assert service._busy
         editor = FakeEditor.instances[-1]
-        assert editor.require_action_on_close is False
+        assert editor.on_autosave is not None
         editor.on_return(True)
         assert not service._busy
         assert actions.restore_calls == 0
@@ -451,7 +449,7 @@ def test_region_capture_cancel_restores_windows(
         service.stop()
 
 
-def test_editor_close_without_action_removes_new_recent(
+def test_editor_close_without_action_keeps_new_recent(
     monkeypatch, tmp_path: Path
 ) -> None:
     service, root, _backend, _actions = setup_service(monkeypatch, tmp_path)
@@ -463,7 +461,7 @@ def test_editor_close_without_action_removes_new_recent(
         assert len(service.recent_entries()) == 1
         editor = FakeEditor.instances[-1]
         editor.on_close(False)
-        assert service.recent_entries() == []
+        assert len(service.recent_entries()) == 1
         assert not service._busy
     finally:
         service.stop()

@@ -31,7 +31,7 @@ py -3 -m venv .venv
 .venv\Scripts\pythonw -m quicktools
 ```
 
-也可以双击 `run.bat`。`pythonw` 不显示控制台窗口。
+也可以双击 `run.bat`（用 `pythonw` 启动，不显示控制台窗口，参数同样原样透传）。
 
 > 首次安装需要联网下载 `pynput`、`pystray`、`Pillow`、`python-xlib`（Linux）与 `jeepney`（Linux，Wayland 截图 portal 使用）。Linux 若提示缺少 Tkinter，请安装发行版提供的 `python3-tk`。
 
@@ -46,7 +46,7 @@ py -3 -m venv .venv
 
 ### 命令行参数
 
-命令行控制采用单实例 IPC 设计：如果已有实例在运行，命令会发送给该实例，不会启动第二个进程。下面以源码方式 `./run.sh` 为例；打包版把 `./run.sh` 换成 `dist/QuickTools/QuickTools` 即可。
+命令行控制采用单实例 IPC 设计：如果已有实例在运行，命令会发送给该实例，不会启动第二个进程。下面以源码方式 `./run.sh` 为例；Linux 打包版把 `./run.sh` 换成 `dist/linux/QuickTools/QuickTools`，Windows 打包版换成 `dist\win\QuickTools\QuickTools.exe` 即可。
 
 ```bash
 ./run.sh               # 不带参数：显示启动器
@@ -91,7 +91,7 @@ py -3 -m venv .venv
 
 `--show`、`--toggle`、`--background`、`--quit` 互斥，只能选择一个；`--foreground` 可以和它们组合。`--tray-helper` 是状态栏托盘子进程使用的内部参数，普通用户不需要指定。
 
-Linux 打包版（`dist/QuickTools/QuickTools`）在终端里直接运行时会先完成单实例检查，然后自动脱离终端转入后台：命令立即返回，关闭终端不会退出应用。需要在前台观察日志时加 `--foreground`，终端会实时打印运行日志；此时关闭终端会结束应用。
+Linux 打包版（`dist/linux/QuickTools/QuickTools`）在终端里直接运行时会先完成单实例检查，然后自动脱离终端转入后台：命令立即返回，关闭终端不会退出应用。需要在前台观察日志时加 `--foreground`，终端会实时打印运行日志；此时关闭终端会结束应用。
 
 后台运行时的日志写入 `~/.local/share/quicktools/logs/quicktools.log`，可实时查看：
 
@@ -197,7 +197,7 @@ pynput 无法在 Wayland 会话中监听整个桌面的键盘事件。当前工�
 - **自动保存**：编辑器的每次修改（标注、移动、裁剪、旋转等）会在约 0.4 秒后自动写回最近截图，原图和缩略图同步更新；如果该截图之前已经导出过文件，也会同步覆盖该文件。编辑器不再提供“保存”按钮，需要另存为新文件时使用“另存为”；`Ctrl+S` 仍可手动保存到设置中的保存目录。关闭编辑器时会立即完成尚未执行的自动保存。
 - **最近截图**：每次截图会保存一份原图到插件数据目录。控制窗口中的最近截图区域支持滚动、搜索、星标收藏、筛选（全部/已收藏/按截图模式）、打开、复制、删除和清空；收藏状态会写入 `recent.db`，重启后保留。编辑、复制或另存为后最近记录会更新为带标注的最终图，返回截图助手时缩略图会立即刷新。窗口缩小时只有最近截图区域收缩并滚动，左侧设置入口、页脚快捷键和保存目录始终保留。
 - **复制反馈**：编辑器点击“复制”后会显示“已复制到剪贴板”提示条，按钮文字临时变为“已复制 ✓”，底部状态栏同步更新；不需要额外确认操作。最近截图里的复制同样会弹出提示。
-- **关闭与返回**：编辑器底部的“关闭”会结束本次截图流程，并确保不留下任何 QuickTools 窗口：截图前被隐藏的窗口不会恢复；从最近截图打开编辑器时，原本可见的截图助手也会一并隐藏。“关闭并返回”会在关闭编辑器后重新显示并聚焦截图助手，方便连续截图；即使截图由全局快捷键发起、助手窗口尚未打开，也会打开助手窗口。修改会自动保存，因此正常关闭不会再因为改动而提示；只有新截图既没有产生修改、也没有复制或另存为时才会询问确认。若自动保存失败，仍会提示存在未保存的修改。标题栏关闭按钮和 `Esc` 的行为与“关闭”相同。
+- **关闭与返回**：编辑器底部的“关闭”会结束本次截图流程，并确保不留下任何 QuickTools 窗口：截图前被隐藏的窗口不会恢复；从最近截图打开编辑器时，原本可见的截图助手也会一并隐藏。“关闭并返回”会在关闭编辑器后重新显示并聚焦截图助手，方便连续截图；即使截图由全局快捷键发起、助手窗口尚未打开，也会打开助手窗口。修改会自动保存，因此直接关闭不会提示未保存；截图本身在打开编辑器时就已写入“最近截图”，所以即使没做任何标注、也没复制或另存为，关闭后该记录依然保留，可以之后再打开继续编辑。只有自动保存失败、确实存在未落库的修改时才会询问确认。标题栏关闭按钮和 `Esc` 的行为与“关闭”相同。
 - **设置**：可修改保存目录、图片格式（PNG/JPEG/WebP）、JPEG 质量、最近截图上限、截图快捷键和启用状态；滚动截图可调滚动格数、每帧等待时间、最大高度和忽略顶部/底部像素。
 - **CLI/IPC**：`--screenshot region`、`--screenshot window`、`--screenshot freeform`、`--screenshot scroll` 均已在 Windows/X11 下可用；`open` 打开控制窗口。
 - **Wayland**：区域和窗口截图通过 `xdg-desktop-portal` 的系统选择器完成；自由截图先由 portal 截取全屏，再在编辑器中用“套索裁剪”圈出保留区域；滚动截图明确不支持；不会静默回退到 X11。Linux Wayland 不提供任何应用内全局截图快捷键（包括 `Ctrl+Alt+1~4`），请把系统快捷键绑定到 `quicktools --screenshot region/window/freeform/scroll`。
@@ -325,62 +325,118 @@ DISPLAY=:0 PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 .venv/bin/pytest \
 
 `PYTEST_DISABLE_PLUGIN_AUTOLOAD=1` 用于避开当前 Ubuntu 环境中 ROS 注入的 pytest 插件；普通干净环境可以省略。
 
+## 提交代码
+
+仓库的提交信息统一使用 `YYMMDD: 描述` 格式，日期是提交当天，例如 2026-10-19 提交“新增加了开机自启动开关”：
+
+```
+261019: 新增加了开机自启动开关
+```
+
+仓库提供了两个便捷脚本自动生成日期前缀，按所在平台选一个即可，参数都是“描述文字”（多个词之间用空格，不用加引号）：
+
+```bash
+./git-update.sh 描述文字        # Linux / macOS / Git Bash
+git-update.bat 描述文字         # Windows cmd / PowerShell
+```
+
+例如：
+
+```bash
+./git-update.sh 修复 CAN 通道分配      # Linux / Git Bash
+git-update.bat 修复 CAN 通道分配       # Windows cmd / PowerShell
+```
+
+两个脚本行为完全一致（`.bat` 只是转调 `.sh`，提交逻辑只有一份）：
+
+- 自动切换到仓库根目录再执行，从任何子目录调用都不会漏提交；
+- 执行 `git add .`，把**当前所有改动**加入暂存区，然后按格式提交；
+- 没有改动时提示“没有需要提交的改动，已跳过”，不会报错；
+- 不带描述文字时打印用法并返回失败。
+
+> **注意**：`git add .` 会把工作区所有改动（包括未跟踪的新文件）一起提交。提交前先用 `git status` 确认，避免把不该入库的文件（例如本地配置、临时产物）带上。`git-update.bat` 依赖 Git for Windows 自带的 bash，找不到时会提示安装。
+
 ## 可选：打包 / 开机启动
 
 这不是“编译”，而是用 PyInstaller 把 Python 应用打包成独立的可执行程序。必须在项目根目录执行，且 PyInstaller 不能跨平台打包（Linux 包在 Linux 上打，Windows 包在 Windows 上打）。
 
-也可直接运行仓库根目录的便捷脚本：
+也可直接运行仓库根目录的便捷脚本。产物统一放在 `dist/` 下，按平台分成 `dist/win/` 和 `dist/linux/`，两边的包不会互相覆盖：
 
-- Linux：`./build_linux.sh`，产出 `dist/QuickTools/QuickTools`
-- Windows：`build_windows.bat`，产出 `dist\QuickTools\QuickTools.exe`（需在真实 Windows 上执行）
+- Linux：`./build_linux.sh`，产出 `dist/linux/QuickTools/QuickTools`（需在 Linux 上执行）
+- Windows 目录版：`build_windows.bat`，只产出 `dist\win\QuickTools\QuickTools.exe`（需在真实 Windows 上执行）
+- Windows 一键全量：`build_all.bat`，一次产出目录版、单文件版和安装包（见下文）
 
-Linux 目录版（默认，启动更快，产出为一个文件夹）：
+全部脚本的用途对照见[仓库脚本一览](#仓库脚本一览)。
+
+### Windows 一键打包
+
+双击或执行 `build_all.bat`，脚本会依次完成：
+
+1. 缺少 `.venv` 时自动创建，并安装依赖；
+2. 按 `QuickTools.spec` 打包目录版，产出 `dist\win\QuickTools\QuickTools.exe`（启动最快，分发时要整个 `dist\win\QuickTools` 文件夹一起拷贝）；
+3. 按 `QuickTools-onefile.spec` 打包单文件版，产出 `dist\win\QuickTools.exe`（约 21 MB，直接发这一个文件；启动时会解压到临时目录，首次启动约 3 秒，退出后自动清理）；
+4. 检测到 [Inno Setup 6](https://jrsoftware.org/isdl.php) 时调用 `installer.iss`，产出 `dist\win\QuickTools-Setup.exe`；未安装则跳过安装包，前两项照常完成。
+
+打包完成后 `dist/win/` 里是三个并列的分发产物：
+
+```
+dist/win/
+├─ QuickTools/            目录版文件夹（整个分发）
+├─ QuickTools.exe         单文件版（直接分发这一个）
+└─ QuickTools-Setup.exe   安装包（安装 Inno Setup 后生成）
+```
+
+中间文件放在 `build\win\`、`build\win_onefile\`，与 Linux 的 `build/linux/` 分开，不会混进分发包。
+
+脚本会检查 `QuickTools.exe` 是否正在运行——文件被占用时 PyInstaller 会失败，请先从状态栏菜单退出程序。安装包按用户安装到 `%LOCALAPPDATA%\Programs\QuickTools`，不需要管理员权限；安装向导本身是英文（Inno Setup 官方不带简体中文语言文件），应用名和快捷方式为中文。
+
+单文件版和安装包都没有代码签名，首次运行时 Windows SmartScreen 可能提示“Windows 已保护你的电脑”，选择“更多信息 → 仍要运行”即可。
+
+### Linux 目录版
+
+`./build_linux.sh` 会自动创建 `.venv`、安装依赖并调用 PyInstaller，产出 `dist/linux/QuickTools/`（启动更快，产出为一个文件夹）。等价的命令是：
 
 ```bash
-cd /home/kk/quicktools
 .venv/bin/pip install pyinstaller
-.venv/bin/pyinstaller --noconfirm --windowed --name QuickTools \
-  --add-data "quicktools/plugins:quicktools/plugins" \
-  --add-data "quicktools/assets:quicktools/assets" \
-  --add-data "quicktools/helpers:quicktools/helpers" \
-  --paths . scripts/quicktools_launcher.py
+.venv/bin/python -m PyInstaller --noconfirm \
+  --distpath dist/linux --workpath build/linux QuickTools.spec
 ```
 
-产出是 `dist/QuickTools/QuickTools`。Linux 打包版在终端里的行为和日志：
+产出是 `dist/linux/QuickTools/QuickTools`。Linux 打包版在终端里的行为和日志：
 
 ```bash
-dist/QuickTools/QuickTools              # 启动并立即返回终端，关闭终端不退出
-dist/QuickTools/QuickTools --foreground # 前台运行，实时打印日志（关闭终端会结束应用）
-dist/QuickTools/QuickTools --toggle     # 切换启动器显示状态
-dist/QuickTools/QuickTools --quit       # 退出已运行的实例
+dist/linux/QuickTools/QuickTools              # 启动并立即返回终端，关闭终端不退出
+dist/linux/QuickTools/QuickTools --foreground # 前台运行，实时打印日志（关闭终端会结束应用）
+dist/linux/QuickTools/QuickTools --toggle     # 切换启动器显示状态
+dist/linux/QuickTools/QuickTools --quit       # 退出已运行的实例
 ```
 
-后台日志位于 `~/.local/share/quicktools/logs/quicktools.log`，可用 `tail -f` 实时查看。打包脚本依赖项目根目录的 `QuickTools.spec`；仓库只保留两个打包脚本：Linux 用 `build_linux.sh`，Windows 用 `build_windows.bat`。脚本会自动创建 `.venv`、安装依赖并调用 PyInstaller。
+后台日志位于 `~/.local/share/quicktools/logs/quicktools.log`，可用 `tail -f` 实时查看。Windows 上 `build_windows.bat` 只产出目录版，`build_all.bat` 额外产出单文件版和安装包。
 
-如果希望得到单个可执行文件，增加 `--onefile`：
+单文件版和安装包目前只配置了 Windows。`QuickTools-onefile.spec` 本身不限定平台，但产物目录和图标是按 Windows 准备的，Windows 上的产物是 `dist\win\QuickTools.exe`。
 
-```bash
-.venv/bin/pyinstaller --noconfirm --onefile --windowed --name QuickTools \
-  --add-data "quicktools/plugins:quicktools/plugins" \
-  --add-data "quicktools/assets:quicktools/assets" \
-  --add-data "quicktools/helpers:quicktools/helpers" \
-  --paths . scripts/quicktools_launcher.py
-```
+## 仓库脚本一览
 
-此时产出为 `dist/QuickTools`，第一次启动会稍慢。用户插件仍从用户数据目录读取，不会打进二进制。
+仓库根目录下的脚本都是便捷入口，源码和打包产物都不依赖它们，直接用 `python -m quicktools` 等命令也能达到同样效果。
 
-Windows 上把 `--add-data` 的分隔符改成 `;`：
+| 脚本 | 平台 | 作用 |
+| --- | --- | --- |
+| `run.sh` | Linux | 从源码启动应用：优先用 `.venv/bin/python`，没有虚拟环境时回退到系统 `python3`；参数原样透传（如 `./run.sh --toggle`） |
+| `run.bat` | Windows | 从源码启动应用，用 `pythonw` 运行，不弹控制台窗口；参数原样透传 |
+| `build_linux.sh` | Linux | 打包目录版：缺少 `.venv` 时自动创建、安装依赖，再按 `QuickTools.spec` 打包，产出 `dist/linux/QuickTools/QuickTools` |
+| `build_windows.bat` | Windows | **只打包目录版**：产出 `dist\win\QuickTools\QuickTools.exe`，分发时要整个文件夹一起拷贝 |
+| `build_all.bat` | Windows | **一键全量打包**：依次产出目录版 `dist\win\QuickTools\`、单文件版 `dist\win\QuickTools.exe`、安装包 `dist\win\QuickTools-Setup.exe`；未安装 Inno Setup 时自动跳过安装包 |
+| `git-update.sh` | Linux/macOS/Git Bash | 按仓库约定的格式提交：`./git-update.sh 描述文字` 会执行 `git add .` 并提交为 `YYMMDD: 描述文字`；没有改动时直接提示并退出。详见[提交代码](#提交代码) |
+| `git-update.bat` | Windows cmd/PowerShell | 上面脚本的 Windows 包装器，用法相同：`git-update.bat 描述文字`；内部转调 `git-update.sh`，需要 Git for Windows 自带的 bash |
 
-```bat
-.venv\Scripts\pip install pyinstaller
-.venv\Scripts\pyinstaller --noconfirm --windowed --icon "quicktools\assets\quicktools.ico" --name QuickTools ^
-  --add-data "quicktools\plugins;quicktools\plugins" ^
-  --add-data "quicktools\assets;quicktools\assets" ^
-  --add-data "quicktools\helpers;quicktools\helpers" ^
-  --paths . scripts\quicktools_launcher.py
-```
+`git-update.sh` 会把当前目录下所有改动一起提交，使用前请确认工作区里没有不该提交的文件。
 
-Windows 目录版产出 `dist\QuickTools\QuickTools.exe`；如需单文件，再加上 `--onefile`。打包后先启动程序，再用 `QuickTools.exe --toggle` 验证单实例唤出。
+`build_windows.bat` 和 `build_all.bat` 的区别只有一个：前者只出目录版，后者额外出单文件版和安装包。三种产物的适用场景见[可选：打包 / 开机启动](#可选打包--开机启动)。
+
+其它构建辅助脚本：
+
+- `scripts/quicktools_launcher.py`：PyInstaller 的入口脚本，打包时调用，日常开发用不到；
+- `scripts/prepare_assets.py`：根据 `logo.png` 重新生成图标资源，见[图片资源](#图片资源)。
 
 ## 图片资源
 

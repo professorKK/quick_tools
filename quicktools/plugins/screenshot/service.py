@@ -524,7 +524,6 @@ class ScreenshotService:
             "on_close": self._editor_closed,
             "on_return": self._editor_closed_and_return,
             "on_autosave": self._autosave_image,
-            "require_action_on_close": record_new,
         }
         if initial_tool is not None:
             editor_kwargs["initial_tool"] = initial_tool
@@ -626,21 +625,10 @@ class ScreenshotService:
         self, done: bool, *, return_to_assistant: bool = False
     ) -> None:
         self._editor = None
-        entry_id = self._active_entry_id
-        is_new = self._active_entry_is_new
+        # 关闭即保留：打开编辑器时原图已写入最近截图，改动又由自动保存落库，
+        # 因此不再删除“没动过就关闭”的新记录。
         self._active_entry_id = None
         self._active_entry_is_new = False
-        if (
-            not done
-            and is_new
-            and entry_id is not None
-            and self.recent is not None
-        ):
-            try:
-                self.recent.delete(entry_id)
-                self._prune_recent()
-            except Exception:
-                log.exception("删除未完成的截图记录失败")
         self._busy = False
         self._captured = None
         self._current_screen = None
