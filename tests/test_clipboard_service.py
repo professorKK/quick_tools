@@ -100,6 +100,41 @@ def drain(root: FakeRoot) -> None:
     root.run_once()
 
 
+def test_copy_image_png_writes_and_records(service) -> None:
+    instance, backend, _root, _tmp_path = service
+    instance.start()
+    data = png_bytes()
+
+    entry = instance.copy_image_png(data)
+
+    assert entry is not None
+    assert backend.image_writes == [data]
+    assert instance.counts()["image"] == 1
+
+
+def test_copy_image_png_without_history(service) -> None:
+    instance, backend, _root, _tmp_path = service
+    instance.start()
+    data = png_bytes()
+
+    entry = instance.copy_image_png(data, record=False)
+
+    assert entry is None
+    assert backend.image_writes == [data]
+    assert instance.counts()["image"] == 0
+
+
+def test_copy_image_png_rejects_invalid_data(service) -> None:
+    instance, backend, _root, _tmp_path = service
+    instance.start()
+
+    with pytest.raises(ClipboardError):
+        instance.copy_image_png(b"not a png")
+
+    assert backend.image_writes == []
+    assert instance.counts()["image"] == 0
+
+
 def test_capture_pause_and_resume(service) -> None:
     instance, backend, root, tmp_path = service
     events: list[tuple[str, int | None]] = []

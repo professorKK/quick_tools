@@ -8,6 +8,8 @@
 - `quicktools.ico`：Windows 可执行文件图标（多尺寸 ICO）。
 - `keypad/`：计算器运算符图标（plus、minus、multiply、divide、equals），由脚本以 4 倍分辨率绘制后缩小，保证边缘平滑。
 
+截图插件控制窗口和编辑器使用的线性图标不是图片资源，由 `quicktools/plugins/screenshot/ui/icons.py` 在运行时用 Pillow 绘制并缓存，不需要在此目录生成文件。
+
 这些派生图片由 `scripts/prepare_assets.py` 从 `logo.png` 生成。更换标志时替换 `logo.png`，重新运行：
 
 ```bash

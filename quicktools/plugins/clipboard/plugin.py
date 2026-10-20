@@ -50,6 +50,13 @@ class ClipboardPlugin(PluginBase):
             except Exception:
                 log.exception("停止剪贴板后台服务失败")
 
+    def copy_image_png(self, png: bytes) -> None:
+        """Public bridge used by other built-in plugins through the launcher."""
+        service = self.service
+        if service is None:
+            raise RuntimeError("剪贴板服务未运行")
+        service.copy_image_png(png)
+
     # ------------------------------------------------------------------- UI
     def create_ui(self, window: tk.Toplevel) -> None:
         if self.service is None:

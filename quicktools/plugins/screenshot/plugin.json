@@ -1,0 +1,12 @@
+{
+  "api_version": 1,
+  "id": "screenshot",
+  "name": "截图",
+  "description": "区域、窗口、自由与滚动截图，支持完整标注编辑、最近截图搜索、筛选与收藏。",
+  "version": "0.1.0",
+  "entry": "plugin.py",
+  "class": "ScreenshotPlugin",
+  "icon": "S",
+  "order": 10,
+  "background": true
+}

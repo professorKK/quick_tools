@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import tkinter as tk
 import tkinter.font as tkfont
+from pathlib import Path
 
 from quicktools import paths
 from quicktools.ui_theme import (
@@ -31,9 +32,23 @@ from quicktools.plugins.calculator.engine import (
     format_result,
     normalize_text,
 )
+from quicktools.plugins.calculator.scratchpad_store import (
+    ScratchEntry,
+    ScratchpadState,
+    load_scratchpad,
+    save_scratchpad,
+)
+from quicktools.plugins.calculator.settings import (
+    load_max_records,
+    load_scientific_mode,
+    save_max_records,
+    save_scientific_mode,
+)
 
 _PAD_X = 12
+_SAVE_DEBOUNCE_MS = 400
 _STATUS_HINT = "自动计算 · Enter 新建下一层 · 支持 0x / 0b / 0o 前缀"
+_SIMPLE_STATUS_HINT = "自动计算 · Enter 新建下一层"
 # The selected base tag is emphasized with color, weight and size.
 _INACTIVE_TAG_SIZE = 9
 _ACTIVE_TAG_SIZE = 11
@@ -101,6 +116,8 @@ class ScratchRow(tk.Frame):
         self.result_value: int | float | None = None
         self.result_base: int | None = None
         self.evaluated_expression: str | None = None
+        self.entry_base = 10
+        self.memory_expression = ""
         self.active = False
 
         self.grid_propagate(False)
@@ -145,6 +162,21 @@ class ScratchRow(tk.Frame):
         )
         self.result_label.grid(row=0, column=1, sticky="e", padx=(3, 10))
 
+        self.delete_button = FlatButton(
+            content,
+            "×",
+            lambda: self.view.delete_row(self),
+            fonts=fonts,
+            font_size=10,
+            padx=5,
+            pady=2,
+            bg=ROW,
+            fg=MUTED,
+            hover_bg="#FDECEA",
+            press_bg="#FAD2CF",
+        )
+        self.delete_button.grid(row=0, column=2, sticky="e", padx=(0, 6))
+
         self.separator = tk.Frame(self, bg=BORDER, height=1)
         self.separator.grid(row=1, column=0, sticky="ew")
 
@@ -160,6 +192,7 @@ class ScratchRow(tk.Frame):
         view.bind_wheel(self.result_label)
         view.bind_wheel(self.stripe)
         view.bind_wheel(content)
+        view.bind_wheel(self.delete_button)
 
     @property
     def expression(self) -> str:
@@ -171,7 +204,19 @@ class ScratchRow(tk.Frame):
         for widget in (self, self.content, self.entry):
             widget.configure(bg=bg)
         self.result_label.configure(bg=bg)
+        self.delete_button.set_idle_colors(bg=bg)
         self.stripe.configure(bg=ACCENT if active else ROW)
+
+    def restore_expression(self, expression: str) -> None:
+        """Load saved text without applying the current base filter."""
+        self._suppress = True
+        try:
+            self.var.set(expression)
+            self.entry.icursor(tk.END)
+        finally:
+            self._suppress = False
+        self.memory_expression = expression
+        self.clear_result()
 
     def _on_focus_in(self, _event=None) -> None:
         self.view.activate_row(self)
@@ -202,6 +247,8 @@ class ScratchRow(tk.Frame):
             finally:
                 self._suppress = False
             raw = filtered
+        self.entry_base = self.view.base
+        self.memory_expression = raw
         if self.evaluated_expression is not None and raw != self.evaluated_expression:
             self.clear_result()
         self.view.on_row_text_changed(self)
@@ -267,16 +314,29 @@ class ScratchRow(tk.Frame):
         self.view.on_row_text_changed(self)
 
     def focus(self) -> None:
-        self.entry.focus_set()
+        try:
+            self.entry.focus_set()
+        except tk.TclError:
+            pass
 
 
 class CalculatorView(tk.Frame):
-    def __init__(self, master: tk.Misc) -> None:
+    def __init__(
+        self, master: tk.Misc, *, data_dir: Path | None = None
+    ) -> None:
         super().__init__(master, bg=BG)
         self.fonts = pick_fonts(self.winfo_toplevel())
+        self.data_dir = Path(data_dir) if data_dir is not None else None
+        self.scientific_mode = load_scientific_mode(self.data_dir)
+        self.max_records = load_max_records(self.data_dir)
         self.base = 10
         self.rows: list[ScratchRow] = []
         self.active_row: ScratchRow | None = None
+        self._scratchpad_state = ScratchpadState()
+        self._save_job: str | None = None
+        self._save_dirty = False
+        self._destroyed = False
+        self._settings_window: tk.Toplevel | None = None
         self._digit_buttons: dict[str, FlatButton] = {}
         self._base_buttons: dict[int, FlatButton] = {}
         self.operator_buttons: list[FlatButton] = []
@@ -299,10 +359,14 @@ class CalculatorView(tk.Frame):
         self._build_base_selector()
         self._build_keypad()
 
-        self.add_row(focus=True)
+        self._apply_scientific_mode(self.scientific_mode, persist=False)
+        state = load_scratchpad(
+            self.data_dir, max_records=self.max_records
+        )
+        self._restore_scratchpad(state)
         self._update_digit_states()
         self._refresh_conversion()
-        self.set_status(_STATUS_HINT)
+        self.set_status(self._default_hint())
 
     def _load_operator_icons(self) -> None:
         for name in ("plus", "minus", "multiply", "divide", "equals"):
@@ -318,13 +382,30 @@ class CalculatorView(tk.Frame):
     def _build_header(self) -> None:
         header = tk.Frame(self, bg=BG)
         header.pack(fill="x", padx=_PAD_X, pady=(12, 6))
-        tk.Label(
+        self.scratchpad_button = FlatButton(
             header,
-            text="草稿纸",
+            "草稿纸 · 设置",
+            self.open_settings,
+            fonts=self.fonts,
+            font_size=13,
+            padx=0,
+            pady=0,
             bg=BG,
             fg=TEXT,
-            font=self.fonts.u(13, "bold"),
-        ).pack(side="left")
+            hover_bg=ROW_ACTIVE,
+        )
+        self.scratchpad_button.configure(font=self.fonts.u(13, "bold"))
+        self.scratchpad_button.pack(side="left")
+        self.scientific_button = FlatButton(
+            header,
+            "科学模式：关",
+            self.toggle_scientific_mode,
+            fonts=self.fonts,
+            font_size=9,
+            padx=10,
+            pady=5,
+        )
+        self.scientific_button.pack(side="right", padx=(10, 0))
         tk.Label(
             header,
             text="点击任意层编辑 · 输入即自动计算",
@@ -389,6 +470,7 @@ class CalculatorView(tk.Frame):
     def _build_conversion_panel(self) -> None:
         outer = tk.Frame(self, bg=BORDER)
         outer.pack(fill="x", padx=_PAD_X, pady=(4, 6))
+        self._conversion_outer = outer
         panel = tk.Frame(outer, bg=PANEL)
         panel.pack(fill="x", padx=1, pady=1)
         panel.grid_columnconfigure(0, weight=1, uniform="conv")
@@ -446,6 +528,7 @@ class CalculatorView(tk.Frame):
     def _build_base_selector(self) -> None:
         row = tk.Frame(self, bg=BG)
         row.pack(fill="x", padx=_PAD_X, pady=(0, 5))
+        self._base_row = row
         tk.Label(
             row,
             text="进制",
@@ -479,6 +562,7 @@ class CalculatorView(tk.Frame):
     def _build_keypad(self) -> None:
         keypad = tk.Frame(self, bg=BG)
         keypad.pack(fill="x", padx=_PAD_X, pady=(2, 12))
+        self._keypad = keypad
 
         function_row = tk.Frame(keypad, bg=BG)
         function_row.pack(fill="x")
@@ -505,6 +589,7 @@ class CalculatorView(tk.Frame):
 
         hex_row = tk.Frame(keypad, bg=BG)
         hex_row.pack(fill="x")
+        self._hex_row = hex_row
         for col, letter in enumerate("ABCDEF"):
             hex_row.grid_columnconfigure(col, weight=1, uniform="hexkey")
             button = FlatButton(
@@ -521,6 +606,7 @@ class CalculatorView(tk.Frame):
 
         numeric = tk.Frame(keypad, bg=BG)
         numeric.pack(fill="x")
+        self._numeric = numeric
         for column in range(4):
             numeric.grid_columnconfigure(column, weight=1, uniform="numkey")
 
@@ -656,14 +742,17 @@ class CalculatorView(tk.Frame):
             self.active_row.set_active(True)
         return self.active_row
 
-    def add_row(self, *, focus: bool = False) -> ScratchRow:
+    def add_row(
+        self, *, focus: bool = False, schedule_scroll: bool = True
+    ) -> ScratchRow:
         row = ScratchRow(self, len(self.rows) + 1, self._row_height, self.fonts)
         row.grid(row=len(self.rows), column=0, sticky="ew")
         self.rows.append(row)
         self.activate_row(row)
         if focus:
             self.after_idle(row.focus)
-        self._schedule_scroll_to_bottom()
+        if schedule_scroll:
+            self._schedule_scroll_to_bottom()
         return row
 
     def _schedule_scroll_to_bottom(self) -> None:
@@ -685,12 +774,17 @@ class CalculatorView(tk.Frame):
     def _on_destroy(self, event: tk.Event) -> None:
         if event.widget is not self:
             return
+        self._destroyed = True
         if self._scroll_job is not None:
             try:
                 self.after_cancel(self._scroll_job)
             except tk.TclError:
                 pass
             self._scroll_job = None
+        self._cancel_scratchpad_save()
+        # Tk destroys children before the parent, so this must only use the
+        # plain-data snapshot captured while the widgets were alive.
+        self._flush_scratchpad()
 
     def activate_row(self, row: ScratchRow) -> None:
         if row not in self.rows:
@@ -704,8 +798,11 @@ class CalculatorView(tk.Frame):
         self._refresh_conversion()
 
     def focus_active(self) -> None:
-        row = self.current_row
-        row.focus()
+        try:
+            row = self.current_row
+            row.focus()
+        except tk.TclError:
+            pass
 
     def evaluate_active(self) -> None:
         self.evaluate_row(self.current_row)
@@ -714,32 +811,40 @@ class CalculatorView(tk.Frame):
         text = row.expression
         if not text.strip():
             return
+        row.entry_base = self.base
         try:
             value = evaluate_live(text, self.base)
         except ExpressionError as exc:
             row.set_error("错误")
             self.set_status(str(exc), error=True)
             self._refresh_conversion()
+            self._request_scratchpad_save()
             return
         except Exception:
             row.set_error("错误")
             self.set_status("计算失败，请检查表达式", error=True)
             self._refresh_conversion()
+            self._request_scratchpad_save()
             return
 
         formatted = format_result(value, self.base)
         row.set_result(value, self.base, formatted)
-        self.set_status(_STATUS_HINT, error=False)
+        self.set_status(self._default_hint(), error=False)
         self.activate_row(row)
         self._refresh_conversion()
+        self._request_scratchpad_save()
         if row is self.rows[-1]:
             self.add_row(focus=True)
 
     def on_row_text_changed(self, row: ScratchRow) -> None:
+        # Cache plain data here as well: clear_all() bypasses the trace.
+        row.memory_expression = row.expression
+        row.entry_base = self.base
         self._update_live_result(row)
         if row is self.active_row:
             self._refresh_conversion()
-        self.set_status(_STATUS_HINT, error=False)
+        self.set_status(self._default_hint(), error=False)
+        self._request_scratchpad_save()
 
     def _update_live_result(self, row: ScratchRow) -> None:
         """Mirror the current input into the result label as it is typed.
@@ -794,8 +899,52 @@ class CalculatorView(tk.Frame):
         self.set_status("", error=False)
         self._refresh_conversion()
 
-    def set_base(self, base: int) -> None:
+    # ------------------------------------------------------- scientific mode
+    def toggle_scientific_mode(self) -> None:
+        self.set_scientific_mode(not self.scientific_mode)
+
+    def set_scientific_mode(self, enabled: bool) -> None:
+        self._apply_scientific_mode(enabled, persist=True)
+
+    def _apply_scientific_mode(self, enabled: bool, *, persist: bool) -> None:
+        enabled = bool(enabled)
+        if not enabled and self.base != 10:
+            # Leaving scientific mode must not keep a non-decimal input base
+            # active behind a hidden selector.
+            self.set_base(10)
+        self.scientific_mode = enabled
+        self.scientific_button.configure(
+            text="科学模式：开" if enabled else "科学模式：关"
+        )
+        self.scientific_button.set_active(enabled)
+        if enabled:
+            if not self._conversion_outer.winfo_manager():
+                self._conversion_outer.pack(
+                    fill="x", padx=_PAD_X, pady=(4, 6), before=self._keypad
+                )
+            if not self._base_row.winfo_manager():
+                self._base_row.pack(
+                    fill="x", padx=_PAD_X, pady=(0, 5), before=self._keypad
+                )
+            if not self._hex_row.winfo_manager():
+                self._hex_row.pack(fill="x", before=self._numeric)
+        else:
+            self._conversion_outer.pack_forget()
+            self._base_row.pack_forget()
+            self._hex_row.pack_forget()
+        self._update_digit_states()
+        self._refresh_conversion()
+        self.set_status(self._default_hint(), error=False)
+        if persist:
+            save_scientific_mode(self.data_dir, enabled)
+
+    def _default_hint(self) -> str:
+        return _STATUS_HINT if self.scientific_mode else _SIMPLE_STATUS_HINT
+
+    def set_base(self, base: int, *, schedule_save: bool = True) -> None:
         if base not in SUPPORTED_BASES:
+            return
+        if not self.scientific_mode and base != 10:
             return
         self.base = base
         for value, button in self._base_buttons.items():
@@ -804,10 +953,14 @@ class CalculatorView(tk.Frame):
             button.configure(
                 font=self.fonts.u(10, "bold" if active else "normal")
             )
+        row = self.current_row
+        row.entry_base = base
         self._update_digit_states()
-        self._update_live_result(self.current_row)
+        self._update_live_result(row)
         self._refresh_conversion()
-        self.current_row.focus()
+        row.focus()
+        if schedule_save:
+            self._request_scratchpad_save()
 
     def _update_digit_states(self) -> None:
         valid_digits = {
@@ -888,3 +1041,220 @@ class CalculatorView(tk.Frame):
                         "bold" if active else "normal",
                     ),
                 )
+
+    # ------------------------------------------------------- scratchpad memory
+    def scratchpad_record_count(self) -> int:
+        return sum(
+            1 for row in self.rows if row.memory_expression.strip()
+        )
+
+    def _restore_scratchpad(self, state: ScratchpadState) -> None:
+        for entry in state.entries:
+            row = self.add_row(schedule_scroll=False)
+            row.entry_base = entry.base
+            row.restore_expression(entry.expression)
+            self._apply_saved_result(row, entry.base)
+        # Always leave a fresh editable row at the bottom.
+        self.add_row(focus=True)
+        if self.scientific_mode and state.last_base in SUPPORTED_BASES:
+            self.set_base(state.last_base, schedule_save=False)
+        self._scratchpad_state = self._capture_scratchpad_state()
+        self._save_dirty = False
+
+    def _apply_saved_result(self, row: ScratchRow, base: int) -> None:
+        text = row.expression
+        if not text.strip():
+            row.clear_result()
+            return
+        try:
+            value = evaluate_live(text, base)
+        except Exception:
+            row.clear_result()
+            return
+        row.set_result(value, base, format_result(value, base))
+
+    def _capture_scratchpad_state(self) -> ScratchpadState:
+        entries = [
+            ScratchEntry(row.memory_expression, row.entry_base)
+            for row in self.rows
+            if row.memory_expression.strip()
+        ]
+        return ScratchpadState(
+            entries=tuple(entries[-self.max_records :]),
+            last_base=self.base,
+        )
+
+    def _request_scratchpad_save(self, *, immediate: bool = False) -> None:
+        if self.data_dir is None or self._destroyed:
+            return
+        self._scratchpad_state = self._capture_scratchpad_state()
+        self._save_dirty = True
+        self._cancel_scratchpad_save()
+        if immediate:
+            self._flush_scratchpad()
+        else:
+            self._save_job = self.after(
+                _SAVE_DEBOUNCE_MS, self._flush_scratchpad
+            )
+
+    def _cancel_scratchpad_save(self) -> None:
+        if self._save_job is None:
+            return
+        try:
+            self.after_cancel(self._save_job)
+        except tk.TclError:
+            pass
+        self._save_job = None
+
+    def _flush_scratchpad(self) -> None:
+        self._cancel_scratchpad_save()
+        if self.data_dir is None or not self._save_dirty:
+            return
+        try:
+            save_scratchpad(
+                self.data_dir,
+                self._scratchpad_state,
+                max_records=self.max_records,
+            )
+        except Exception:
+            log.exception("保存草稿纸记忆失败")
+            return
+        self._save_dirty = False
+
+    def delete_row(self, row: ScratchRow) -> None:
+        if row not in self.rows:
+            return
+        index = self.rows.index(row)
+        had_text = bool(row.memory_expression.strip())
+        was_active = self.active_row is row
+        self.rows.pop(index)
+        if was_active:
+            self.active_row = None
+        try:
+            row.destroy()
+        except tk.TclError:
+            pass
+        if not self.rows:
+            self.add_row(focus=True)
+        else:
+            self._regrid_rows()
+            if was_active:
+                target = self.rows[min(index, len(self.rows) - 1)]
+                self.activate_row(target)
+                target.focus()
+            else:
+                self._refresh_conversion()
+        self._request_scratchpad_save(immediate=True)
+        self.set_status(
+            "已删除 1 条记录" if had_text else "已删除空行", error=False
+        )
+
+    def clear_scratchpad(self) -> int:
+        count = self.scratchpad_record_count()
+        for row in list(self.rows):
+            try:
+                row.destroy()
+            except tk.TclError:
+                pass
+        self.rows.clear()
+        self.active_row = None
+        self.add_row(focus=True)
+        self._refresh_conversion()
+        self._request_scratchpad_save(immediate=True)
+        self.set_status("已清空草稿纸记忆", error=False)
+        return count
+
+    def apply_max_records(self, value: int) -> int:
+        normalized = save_max_records(self.data_dir, value)
+        self.max_records = normalized
+        removed = self._trim_rows_to_limit()
+        self._request_scratchpad_save(immediate=True)
+        if removed:
+            self.set_status(
+                f"已保留最近 {normalized} 条记录", error=False
+            )
+        else:
+            self.set_status(f"最多保存 {normalized} 条记录", error=False)
+        return removed
+
+    def _trim_rows_to_limit(self) -> int:
+        records = [
+            row for row in self.rows if row.memory_expression.strip()
+        ]
+        excess = len(records) - self.max_records
+        if excess <= 0:
+            return 0
+        active = self.active_row
+        active_index = self.rows.index(active) if active in self.rows else 0
+        for row in records[:excess]:
+            if row not in self.rows:
+                continue
+            self.rows.remove(row)
+            try:
+                row.destroy()
+            except tk.TclError:
+                pass
+        if not self.rows:
+            self.active_row = None
+            self.add_row()
+        else:
+            self._regrid_rows()
+            if active is None or active not in self.rows:
+                target_index = max(
+                    0, min(active_index - excess, len(self.rows) - 1)
+                )
+                target = self.rows[target_index]
+                self.active_row = None
+                self.activate_row(target)
+                target.focus()
+        self._refresh_conversion()
+        return excess
+
+    def _regrid_rows(self) -> None:
+        for index, row in enumerate(self.rows):
+            row.grid(row=index, column=0, sticky="ew")
+            row.row_index = index + 1
+        try:
+            self.after_idle(self._sync_paper_layout)
+        except tk.TclError:
+            pass
+
+    # ------------------------------------------------------------ settings UI
+    def open_settings(self) -> None:
+        window = self._settings_window
+        if window is not None and self._window_exists(window):
+            try:
+                window.deiconify()
+                window.lift()
+                window.focus_force()
+            except tk.TclError:
+                pass
+            return
+        self._cancel_scratchpad_save()
+        self._flush_scratchpad()
+        from quicktools.plugins.calculator.settings_view import (
+            ScratchpadSettingsDialog,
+        )
+
+        window = ScratchpadSettingsDialog(self.winfo_toplevel(), self)
+        self._settings_window = window
+        window.bind(
+            "<Destroy>",
+            lambda event, w=window: self._on_settings_destroyed(event, w),
+            add="+",
+        )
+
+    def _on_settings_destroyed(
+        self, event: tk.Event, window: tk.Toplevel
+    ) -> None:
+        if event.widget is not window:
+            return
+        if self._settings_window is window:
+            self._settings_window = None
+
+    @staticmethod
+    def _window_exists(window: tk.Misc) -> bool:
+        try:
+            return bool(window.winfo_exists())
+        except tk.TclError:
+            return False

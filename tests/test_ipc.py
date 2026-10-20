@@ -6,7 +6,12 @@ from pathlib import Path
 
 import pytest
 
-from quicktools.ipc import IpcServer, send_command, send_tray_menu
+from quicktools.ipc import (
+    IpcServer,
+    is_valid_command,
+    send_command,
+    send_tray_menu,
+)
 
 pytestmark = pytest.mark.skipif(
     sys.platform == "win32", reason="Unix socket path is exercised on POSIX"
@@ -21,12 +26,24 @@ def test_ipc_commands(tmp_path: Path) -> None:
     try:
         # ping is answered but must not trigger a UI command.
         assert send_command("ping", endpoint=endpoint)
-        for command in ("show", "toggle", "settings", "quit"):
+        for command in (
+            "show",
+            "toggle",
+            "settings",
+            "quit",
+            "plugin screenshot capture_region",
+        ):
             assert send_command(command, endpoint=endpoint)
         deadline = time.time() + 2
-        while len(received) < 4 and time.time() < deadline:
+        while len(received) < 5 and time.time() < deadline:
             time.sleep(0.02)
-        assert received == ["show", "toggle", "settings", "quit"]
+        assert received == [
+            "show",
+            "toggle",
+            "settings",
+            "quit",
+            "plugin screenshot capture_region",
+        ]
     finally:
         server.stop()
     assert not endpoint.exists()
@@ -48,6 +65,17 @@ def test_second_server_is_rejected(tmp_path: Path) -> None:
     finally:
         first.stop()
         second.stop()
+
+
+def test_plugin_command_validation() -> None:
+    assert is_valid_command("plugin screenshot capture_region")
+    assert is_valid_command("plugin my-plugin capture_region")
+    assert not is_valid_command("plugin screenshot")
+    assert not is_valid_command("plugin Screenshot capture")
+    assert not is_valid_command("plugin screenshot capture region")
+    assert not is_valid_command("plugin screenshot " + "x" * 64)
+    with pytest.raises(ValueError):
+        send_command("plugin screenshot")
 
 
 def test_send_without_server_returns_false(tmp_path: Path) -> None:

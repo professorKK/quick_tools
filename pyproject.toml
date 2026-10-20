@@ -5,13 +5,14 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "quicktools"
 version = "0.1.0"
-description = "A small cross-platform plugin launcher with a programmer calculator"
+description = "A small cross-platform plugin launcher with a calculator, clipboard history and screenshot tools"
 requires-python = ">=3.10"
 dependencies = [
   "pynput>=1.7.7,<2",
   "pystray>=0.19.5,<1",
   "Pillow>=9.0,<12",
   "python-xlib>=0.33; sys_platform == 'linux'",
+  "jeepney>=0.8,<1; sys_platform == 'linux'",
 ]
 
 [project.optional-dependencies]

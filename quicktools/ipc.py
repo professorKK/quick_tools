@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import socket
 import sys
 import threading
@@ -17,6 +18,18 @@ log = logging.getLogger(__name__)
 VALID_COMMANDS = frozenset({"toggle", "show", "settings", "quit", "ping"})
 WINDOWS_PORT = 50517
 _MAX_MESSAGE = 64
+_PLUGIN_COMMAND_RE = re.compile(
+    r"^plugin [a-z0-9][a-z0-9_-]{0,63} [a-z0-9][a-z0-9_.-]{0,63}$"
+)
+
+
+def is_valid_command(command: str) -> bool:
+    """Return True for a built-in command or a well-formed plugin action."""
+    if command in VALID_COMMANDS:
+        return True
+    if len(command) > _MAX_MESSAGE:
+        return False
+    return bool(_PLUGIN_COMMAND_RE.match(command))
 
 
 def _endpoint_path(endpoint: Path | None = None) -> Path:
@@ -51,7 +64,7 @@ def _send_payload(payload: str, endpoint: Path | None = None) -> bool:
 
 def send_command(command: str, endpoint: Path | None = None) -> bool:
     """Send a command to the primary instance. Returns True on success."""
-    if command not in VALID_COMMANDS:
+    if not is_valid_command(command):
         raise ValueError(f"unknown IPC command: {command}")
     return _send_payload(command, endpoint)
 
@@ -156,7 +169,7 @@ class IpcServer:
                                 conn.sendall(b"OK\n")
                             except OSError:
                                 pass
-                    elif command in VALID_COMMANDS:
+                    elif is_valid_command(command):
                         self.callback(command)
                         try:
                             conn.sendall(b"OK\n")

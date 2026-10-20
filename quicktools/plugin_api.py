@@ -5,7 +5,7 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 
 class PluginError(Exception):
@@ -51,6 +51,21 @@ def _is_emoji_like(text: str) -> bool:
 
 
 @dataclass(frozen=True)
+class PluginActions:
+    """Optional core services available to built-in plugins.
+
+    ``post_action`` is the only thread-safe member. The other callables must
+    be invoked on the Tk main thread.
+    """
+
+    post_action: Callable[[str], None]
+    open_window: Callable[[], None]
+    hide_windows: Callable[[], Callable[[], None]]
+    copy_png_to_clipboard: Callable[[bytes], None]
+    app_hotkey_display: Callable[[], str]
+
+
+@dataclass(frozen=True)
 class PluginContext:
     """Useful services and paths exposed to a plugin.
 
@@ -62,6 +77,7 @@ class PluginContext:
     plugin_id: str
     plugin_dir: Path
     data_dir: Path
+    actions: PluginActions | None = None
 
 
 class PluginBase(ABC):
@@ -86,4 +102,12 @@ class PluginBase(ABC):
 
         Called on application shutdown and when a background plugin is
         removed or changed on disk. The default is a no-op.
+        """
+
+    def handle_action(self, action: str) -> None:
+        """Handle a named action on the Tk main thread.
+
+        Actions are ASCII identifiers and carry no payload. Plugins should
+        ignore unknown actions. Long-running work must be moved to a worker
+        thread; this method must return promptly. The default is a no-op.
         """

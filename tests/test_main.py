@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import queue
 from typing import ClassVar
 
 import pytest
@@ -15,6 +16,7 @@ class FakeApp:
     def __init__(self, start_visible: bool = True) -> None:
         self.start_visible = start_visible
         self.ran = False
+        self.commands: queue.Queue[str] = queue.Queue()
         FakeApp.instances.append(self)
 
     def run(self) -> None:
@@ -113,6 +115,57 @@ def test_quit_without_instance_does_not_start_app(patched: FakeIpc) -> None:
 def test_background_is_mutually_exclusive(patched: FakeIpc) -> None:
     with pytest.raises(SystemExit):
         cli.main(["--background", "--show"])
+    assert patched.commands == []
+
+
+@pytest.mark.parametrize(
+    ("mode", "action"),
+    [
+        ("region", "capture_region"),
+        ("window", "capture_window"),
+        ("freeform", "capture_freeform"),
+        ("scroll", "capture_scroll"),
+        ("open", "open"),
+    ],
+)
+def test_screenshot_maps_mode_to_plugin_action(
+    patched: FakeIpc, mode: str, action: str
+) -> None:
+    patched.result = True
+
+    argv = ["--screenshot", mode]
+    assert cli.main(argv) == 0
+
+    assert patched.commands == [f"plugin screenshot {action}"]
+    assert FakeApp.instances == []
+
+
+def test_screenshot_defaults_to_region(patched: FakeIpc) -> None:
+    patched.result = True
+
+    assert cli.main(["--screenshot"]) == 0
+
+    assert patched.commands == ["plugin screenshot capture_region"]
+
+
+def test_screenshot_starts_hidden_and_enqueues_without_instance(
+    patched: FakeIpc,
+) -> None:
+    patched.result = False
+
+    assert cli.main(["--screenshot", "region"]) == 0
+
+    assert patched.commands == ["plugin screenshot capture_region"]
+    assert len(FakeApp.instances) == 1
+    app = FakeApp.instances[0]
+    assert app.start_visible is False
+    assert app.ran
+    assert app.commands.get_nowait() == "plugin screenshot capture_region"
+
+
+def test_screenshot_is_mutually_exclusive(patched: FakeIpc) -> None:
+    with pytest.raises(SystemExit):
+        cli.main(["--screenshot", "--show"])
     assert patched.commands == []
 
 

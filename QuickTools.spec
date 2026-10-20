@@ -4,14 +4,28 @@ import sys
 
 # Built-in plugins are loaded dynamically from the data directory, so
 # PyInstaller's static analysis cannot see their imports. Keep this list in
-# sync with quicktools/plugins/clipboard.
+# sync with quicktools/plugins/clipboard and quicktools/plugins/screenshot.
 hiddenimports = [
     'PIL.Image',
     'PIL.ImageTk',
     'PIL.ImageOps',
+    'PIL.ImageDraw',
+    'PIL.ImageFont',
+    'PIL.ImageGrab',
+    'PIL.ImageChops',
+    'PIL.ImageStat',
+    'PIL.ImageColor',
     'PIL.BmpImagePlugin',
+    'PIL.PngImagePlugin',
+    'PIL.JpegImagePlugin',
+    'PIL.WebPImagePlugin',
     'PIL._tkinter_finder',
     'sqlite3',
+    'tkinter.filedialog',
+    'tkinter.messagebox',
+    'tkinter.simpledialog',
+    'tkinter.ttk',
+    'tkinter.font',
     'hashlib',
     'uuid',
     'shutil',
@@ -28,6 +42,14 @@ if sys.platform.startswith('linux'):
         'Xlib.error',
         'Xlib.protocol.event',
         'Xlib.ext.xfixes',
+        'Xlib.ext.randr',
+        'Xlib.ext.xtest',
+        'jeepney',
+        'jeepney.auth',
+        'jeepney.bus_messages',
+        'jeepney.io.blocking',
+        'jeepney.low_level',
+        'jeepney.wrappers',
     ])
 
 

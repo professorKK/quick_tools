@@ -1,0 +1,1 @@
+"""Scrolling screenshot capture."""

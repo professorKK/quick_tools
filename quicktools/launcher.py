@@ -5,11 +5,17 @@ from __future__ import annotations
 import sys
 import tkinter as tk
 from tkinter import messagebox
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Callable
 
 from . import paths
 from .logging_setup import get_logger
-from .plugin_api import PluginBase, PluginContext, PluginMeta
+from .plugin_api import (
+    PluginActions,
+    PluginBase,
+    PluginContext,
+    PluginError,
+    PluginMeta,
+)
 from .ui_theme import (
     ACCENT,
     BG,
@@ -242,12 +248,126 @@ class Launcher:
     def _make_context(self, meta: PluginMeta) -> PluginContext:
         data_dir = paths.plugin_data_dir(meta.id)
         data_dir.mkdir(parents=True, exist_ok=True)
+        actions = PluginActions(
+            post_action=lambda action, mid=meta.id: self._post_plugin_action(
+                mid, action
+            ),
+            open_window=lambda m=meta: self.open_plugin(m),
+            hide_windows=self._hide_windows_for_capture,
+            copy_png_to_clipboard=self._copy_png_via_clipboard,
+            app_hotkey_display=self._app_hotkey_display,
+        )
         return PluginContext(
             root=self.root,
             plugin_id=meta.id,
             plugin_dir=meta.folder,
             data_dir=data_dir,
+            actions=actions,
         )
+
+    def _post_plugin_action(self, plugin_id: str, action: str) -> None:
+        commands = getattr(self.app, "commands", None)
+        if commands is None:
+            log.warning("应用命令队列不可用，无法投递插件动作：%s %s", plugin_id, action)
+            return
+        commands.put(f"plugin {plugin_id} {action}")
+
+    def _hide_windows_for_capture(self) -> Callable[[], None]:
+        hide = getattr(self.app, "hide_for_capture", None)
+        if callable(hide):
+            return hide()
+        return self.hide_all_windows()
+
+    def _app_hotkey_display(self) -> str:
+        settings = getattr(self.app, "settings", None)
+        hotkey = getattr(settings, "hotkey", None)
+        display = getattr(hotkey, "display", None)
+        if not callable(display):
+            return ""
+        try:
+            return str(display())
+        except Exception:
+            return ""
+
+    def _copy_png_via_clipboard(self, png: bytes) -> None:
+        entry = self._background_plugins.get("clipboard")
+        if entry is None:
+            raise PluginError("剪贴板服务未运行，无法复制截图")
+        instance = entry[1]
+        writer = getattr(instance, "copy_image_png", None)
+        if not callable(writer):
+            raise PluginError("剪贴板插件版本过旧，无法复制截图")
+        writer(png)
+
+    def dispatch_plugin_action(self, plugin_id: str, action: str) -> bool:
+        """Dispatch an action to a running background plugin instance."""
+        meta = next((item for item in self.plugins if item.id == plugin_id), None)
+        if meta is None:
+            log.warning("忽略未知插件的动作：%s %s", plugin_id, action)
+            return False
+        if not meta.background:
+            log.warning("插件 %s 不是后台插件，不能接收动作", plugin_id)
+            return False
+        entry = self._background_plugins.get(plugin_id)
+        if entry is not None:
+            instance = entry[1]
+        else:
+            try:
+                instance = self._instance_for(meta)
+            except Exception:
+                log.exception("启动插件 %s 以处理动作失败", plugin_id)
+                return False
+        try:
+            instance.handle_action(action)
+        except Exception:
+            log.exception("插件 %s 处理动作 %s 失败", plugin_id, action)
+            return False
+        return True
+
+    def hide_all_windows(self) -> Callable[[], None]:
+        """Withdraw all tracked QuickTools windows and return a restore callback.
+
+        Only windows that were visible at call time are restored. The callback
+        is idempotent and tolerates windows destroyed while hidden.
+        """
+        hidden: list[tk.Toplevel] = []
+
+        def collect(window: tk.Toplevel | None) -> None:
+            if window is None or not self._exists(window):
+                return
+            try:
+                if window.winfo_viewable():
+                    hidden.append(window)
+                    window.withdraw()
+            except tk.TclError:
+                pass
+
+        collect(self.window)
+        collect(self._tray_popup)
+        for window in list(self._plugin_windows.values()):
+            collect(window)
+        try:
+            self.root.update_idletasks()
+        except tk.TclError:
+            pass
+
+        restored = False
+
+        def restore() -> None:
+            nonlocal restored
+            if restored:
+                return
+            restored = True
+            for window in hidden:
+                if not self._exists(window):
+                    continue
+                try:
+                    window.deiconify()
+                    window.lift()
+                except tk.TclError:
+                    pass
+
+        return restore
 
     def _new_instance(self, meta: PluginMeta) -> PluginBase:
         plugin_class = self.loader.load_class(meta)

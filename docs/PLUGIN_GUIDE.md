@@ -101,6 +101,30 @@ class MyPlugin(PluginBase):
 - 同一个插件最多只有一个窗口，重复点击卡片会聚焦已有窗口。
 - 插件窗口关闭不影响主程序或启动器；启动器通过全局快捷键再次唤出。
 
+### 插件动作（可选）
+
+内置插件可以通过 `PluginBase.handle_action(action)` 接收来自 CLI、IPC 或插件自身的命名动作。这是可选能力，默认实现为空操作，现有插件无需修改。
+
+```python
+class MyPlugin(PluginBase):
+    def handle_action(self, action: str) -> None:
+        if action == "capture":
+            ...
+```
+
+- `handle_action` 总是在 Tk 主线程调用，必须尽快返回；耗时工作放到后台线程，并通过 `context.root.after(...)` 回到主线程。
+- 动作名是 ASCII 标识符，不带参数；不同变体使用不同动作名。
+- 插件必须忽略未知动作，不要因为未知动作抛异常。
+- `context.actions` 是可选字段，可能为 `None`。它提供：
+  - `post_action(action)`：线程安全，把动作投递到主线程；适合快捷键回调。
+  - `open_window()`：打开插件自己的主窗口，仅主线程。
+  - `hide_windows()`：隐藏启动器、设置窗口和所有插件窗口，返回恢复回调；仅主线程，用于截图等需要隐藏 QuickTools 窗口的场景。
+  - `copy_png_to_clipboard(png)`：把 PNG 字节写入系统剪贴板，并记录到剪贴板历史；仅主线程。
+  - `app_hotkey_display()`：返回启动器快捷键的可读文本，用于冲突提示。
+- 动作分发目前只支持 `background: true` 插件；普通插件没有常驻实例，无法可靠接收动作。
+
+命令行 `--screenshot [MODE]` 和 IPC 命令 `plugin <id> <action>` 会经过同一条动作链路。IPC 只接受本地连接、严格格式的 ASCII 动作名，不接受任意负载。
+
 ### 支持的插件 UI
 
 你可以使用任何 Tkinter 控件，也可以创建额外的 `Toplevel`。如果希望和主程序视觉一致，可以导入（非稳定 API）：

@@ -1,4 +1,4 @@
-"""Shared dark theme helpers for Tkinter windows and plugins."""
+"""Shared light theme helpers for Tkinter windows and plugins."""
 
 from __future__ import annotations
 
@@ -21,6 +21,8 @@ MUTED = "#6b7280"
 ACCENT = "#2563eb"
 ACCENT_HOVER = "#3b82f6"
 ACCENT_DARK = "#1d4ed8"
+ACCENT_SOFT = "#eef4ff"
+ACCENT_SOFT_HOVER = "#dbeafe"
 ON_ACCENT = "#ffffff"
 DANGER = "#c5221f"
 SUCCESS = "#15803d"
@@ -136,24 +138,45 @@ class FlatButton(tk.Label):
         hover_bg: str | None = None,
         press_bg: str | None = None,
         disabled_fg: str = DISABLED_TEXT,
+        image=None,
+        active_image=None,
+        disabled_image=None,
+        active_bg: str | None = None,
+        active_fg: str | None = None,
+        active_hover_bg: str | None = None,
         **kwargs,
     ) -> None:
         self._command = command
         self._enabled = True
+        self._pressed = False
         self._accent = accent
-        self._normal_bg = bg or (ACCENT_DARK if accent else BUTTON)
-        self._normal_fg = fg or (ON_ACCENT if accent else TEXT)
-        self._hover_bg = hover_bg or (ACCENT_HOVER if accent else BUTTON_HOVER)
-        self._press_bg = press_bg or (ACCENT_DARK if accent else BUTTON_PRESSED)
+        self._active = bool(accent)
+        self._idle_bg = bg or (ACCENT_DARK if accent else BUTTON)
+        self._idle_fg = fg or (ON_ACCENT if accent else TEXT)
+        self._idle_hover_bg = hover_bg or (
+            ACCENT_HOVER if accent else BUTTON_HOVER
+        )
+        self._idle_press_bg = press_bg or (
+            ACCENT_DARK if accent else BUTTON_PRESSED
+        )
+        self._active_bg = active_bg or ACCENT_DARK
+        self._active_fg = active_fg or ON_ACCENT
+        self._active_hover_bg = active_hover_bg or ACCENT_HOVER
+        self._idle_image = image
+        self._active_image = active_image
+        self._disabled_image = disabled_image
         self._disabled_fg = disabled_fg
         self._fonts = fonts
+        if image is not None and "compound" not in kwargs:
+            kwargs["compound"] = "left"
         super().__init__(
             master,
             text=text,
-            bg=self._normal_bg,
-            fg=self._normal_fg,
-            activebackground=self._press_bg,
-            activeforeground=ON_ACCENT if accent else TEXT,
+            image=image,
+            bg=self._current_bg(),
+            fg=self._current_fg(),
+            activebackground=self._current_press_bg(),
+            activeforeground=self._current_fg(),
             font=(fonts or Fonts("TkDefaultFont", "TkFixedFont")).u(font_size),
             padx=padx,
             pady=pady,
@@ -165,43 +188,97 @@ class FlatButton(tk.Label):
         self.bind("<Button-1>", self._on_click)
         self.bind("<ButtonRelease-1>", self._on_release)
 
+    def _current_bg(self) -> str:
+        return self._active_bg if self._active else self._idle_bg
+
+    def _current_fg(self) -> str:
+        return self._active_fg if self._active else self._idle_fg
+
+    def _current_hover_bg(self) -> str:
+        return self._active_hover_bg if self._active else self._idle_hover_bg
+
+    def _current_press_bg(self) -> str:
+        return self._active_bg if self._active else self._idle_press_bg
+
+    def _current_image(self):
+        if self._active and self._active_image is not None:
+            return self._active_image
+        return self._idle_image
+
+    def _apply_style(self) -> None:
+        self.configure(
+            bg=self._current_bg(),
+            fg=self._current_fg(),
+            activebackground=self._current_press_bg(),
+            activeforeground=self._current_fg(),
+            image=self._current_image() if self._current_image() is not None else "",
+        )
+
     def _on_enter(self, _event=None) -> None:
         if self._enabled:
-            self.configure(bg=self._hover_bg)
+            self.configure(bg=self._current_hover_bg())
 
     def _on_leave(self, _event=None) -> None:
+        self._pressed = False
         if self._enabled:
-            self.configure(bg=self._normal_bg)
+            self.configure(bg=self._current_bg())
 
     def _on_click(self, _event=None) -> None:
         if self._enabled:
-            self.configure(bg=self._press_bg)
+            self._pressed = True
+            self.configure(bg=self._current_press_bg())
 
     def _on_release(self, _event=None) -> None:
+        # A window opened on ButtonPress (for example a launcher card) can
+        # receive the ButtonRelease under the pointer. Only act when this
+        # widget saw the matching press; otherwise a stray release would
+        # trigger phantom clicks in the newly opened window.
+        pressed = self._pressed
+        self._pressed = False
         if not self._enabled:
             return
-        self.configure(bg=self._hover_bg)
-        self._command()
+        self.configure(bg=self._current_hover_bg())
+        if pressed:
+            self._command()
 
     def set_enabled(self, enabled: bool) -> None:
         self._enabled = enabled
+        if not enabled:
+            self._pressed = False
         if enabled:
-            self.configure(
-                bg=ACCENT_DARK if self._accent else self._normal_bg,
-                fg=self._normal_fg,
-                cursor="hand2",
-            )
+            self._apply_style()
+            self.configure(cursor="hand2")
         else:
-            self.configure(bg=DISABLED_BG, fg=self._disabled_fg, cursor="")
+            image = self._disabled_image or self._idle_image
+            self.configure(
+                bg=DISABLED_BG,
+                fg=self._disabled_fg,
+                cursor="",
+                image=image if image is not None else "",
+            )
 
     def set_active(self, active: bool) -> None:
-        self._accent = active
-        self._normal_bg = ACCENT_DARK if active else BUTTON
-        self._normal_fg = ON_ACCENT if active else TEXT
-        self._hover_bg = ACCENT_HOVER if active else BUTTON_HOVER
-        self._press_bg = ACCENT_DARK if active else BUTTON_PRESSED
-        self.configure(
-            bg=ACCENT_DARK if active else self._normal_bg,
-            fg=self._normal_fg,
-            activeforeground=ON_ACCENT if active else TEXT,
-        )
+        self._active = bool(active)
+        self._accent = self._active
+        if self._enabled:
+            self._apply_style()
+
+    def set_idle_colors(
+        self,
+        *,
+        bg: str | None = None,
+        fg: str | None = None,
+        hover_bg: str | None = None,
+        press_bg: str | None = None,
+    ) -> None:
+        """Update the non-active palette, e.g. when a row changes background."""
+        if bg is not None:
+            self._idle_bg = bg
+        if fg is not None:
+            self._idle_fg = fg
+        if hover_bg is not None:
+            self._idle_hover_bg = hover_bg
+        if press_bg is not None:
+            self._idle_press_bg = press_bg
+        if self._enabled:
+            self._apply_style()

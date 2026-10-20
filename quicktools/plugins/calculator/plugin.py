@@ -13,7 +13,7 @@ class CalculatorPlugin(PluginBase):
     def create_ui(self, window: tk.Toplevel) -> None:
         window.title("计算器 · 快捷工具")
         window.configure(bg=BG)
-        view = CalculatorView(window)
+        view = CalculatorView(window, data_dir=self.context.data_dir)
         view.pack(fill="both", expand=True)
 
         window.update_idletasks()

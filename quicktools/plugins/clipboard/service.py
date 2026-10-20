@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import io
 import logging
 import queue
 import threading
@@ -10,6 +11,8 @@ import tkinter as tk
 from dataclasses import replace
 from pathlib import Path
 from typing import Any, Callable
+
+from PIL import Image
 
 from .backends import create_backend
 from .backends.base import ClipboardBackend
@@ -317,6 +320,64 @@ class ClipboardService:
         updated = self.store.touch(entry.id)
         self._notify("copied", entry.id)
         return updated
+
+    def copy_image_png(
+        self, png: bytes, *, record: bool = True
+    ) -> ClipboardEntry | None:
+        """Write PNG bytes to the system clipboard.
+
+        When ``record`` is true the image is also added to clipboard history.
+        The caller must be on the Tk main thread because the store writes
+        files and SQLite rows synchronously.
+        """
+        if not isinstance(png, (bytes, bytearray)) or not png:
+            raise ClipboardError("截图图片数据为空")
+        payload = bytes(png)
+        try:
+            with Image.open(io.BytesIO(payload)) as image:
+                image.load()
+                if image.format != "PNG":
+                    buffer = io.BytesIO()
+                    image.save(buffer, format="PNG")
+                    payload = buffer.getvalue()
+        except Exception as exc:
+            raise ClipboardError("截图图片数据无效") from exc
+
+        content = ClipboardContent(
+            kind=ClipboardKind.IMAGE,
+            image_png=payload,
+            source="QuickTools 截图",
+            platform=current_platform(),
+        )
+        digest = content_digest(content)
+        self._begin_suppression(digest)
+        try:
+            self.backend.write_image(payload)
+        except Exception:
+            self._clear_suppression()
+            raise
+
+        entry: ClipboardEntry | None = None
+        if record:
+            try:
+                entry = self.store.add(
+                    content, max_image_bytes=self.settings.max_image_bytes
+                )
+                self.store.prune(
+                    max_entries=self.settings.max_entries,
+                    max_image_bytes=self.settings.max_image_bytes,
+                )
+                self.last_error = ""
+                self._notify("added", entry.id)
+            except ClipboardError as exc:
+                self.last_error = str(exc)
+                log.warning("记录截图到剪贴板历史失败：%s", exc)
+                self._notify("error", None)
+            except Exception:
+                self.last_error = "记录截图到剪贴板历史失败，详见日志"
+                log.exception("记录截图到剪贴板历史失败")
+                self._notify("error", None)
+        return entry
 
     def copy_plain_text(self, text: str) -> None:
         """Copy a path/string without adding it as a history entry."""

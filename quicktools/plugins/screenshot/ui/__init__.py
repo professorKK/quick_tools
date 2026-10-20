@@ -1,0 +1,1 @@
+"""Screenshot plugin UI components."""

@@ -28,6 +28,14 @@ def view():
     root.destroy()
 
 
+@pytest.fixture()
+def scientific_view(view):
+    calculator, root = view
+    calculator.set_scientific_mode(True)
+    root.update_idletasks()
+    return calculator, root
+
+
 def test_default_viewport_is_four_rows(view) -> None:
     calculator, root = view
     assert calculator.canvas.cget("height") == str(calculator._row_height * 4)
@@ -48,8 +56,8 @@ def test_current_row_sits_at_bottom_of_empty_paper(view) -> None:
     assert offset + row_height == pytest.approx(calculator.canvas.winfo_height(), abs=1)
 
 
-def test_evaluate_and_add_row(view) -> None:
-    calculator, root = view
+def test_evaluate_and_add_row(scientific_view) -> None:
+    calculator, root = scientific_view
     entry = calculator.current_row.entry
     entry.insert(0, "1+1")
     calculator.evaluate_active()
@@ -87,8 +95,8 @@ def test_fullwidth_parentheses_normalized(view) -> None:
     assert calculator.rows[0].result_label.cget("text") == "= 9"
 
 
-def test_hex_mode_and_conversions(view) -> None:
-    calculator, root = view
+def test_hex_mode_and_conversions(scientific_view) -> None:
+    calculator, root = scientific_view
     calculator.set_base(16)
     calculator.insert_text("FF")
     calculator.evaluate_active()
@@ -98,8 +106,8 @@ def test_hex_mode_and_conversions(view) -> None:
     assert calculator._conversion_vars[2].get() == "0b1111 1111"
 
 
-def test_result_updates_while_typing(view) -> None:
-    calculator, root = view
+def test_result_updates_while_typing(scientific_view) -> None:
+    calculator, root = scientific_view
     entry = calculator.current_row.entry
     for ch in "1+2*":
         entry.insert(tk.INSERT, ch)
@@ -108,8 +116,8 @@ def test_result_updates_while_typing(view) -> None:
     assert calculator._conversion_vars[10].get() == "3"
 
 
-def test_uncalculable_input_shows_no_result(view) -> None:
-    calculator, root = view
+def test_uncalculable_input_shows_no_result(scientific_view) -> None:
+    calculator, root = scientific_view
     entry = calculator.current_row.entry
     entry.insert(0, "1^")
     root.update_idletasks()
@@ -117,8 +125,8 @@ def test_uncalculable_input_shows_no_result(view) -> None:
     assert calculator._conversion_vars[10].get() == "—"
 
 
-def test_hex_input_filters_invalid_chars_and_uses_hex(view) -> None:
-    calculator, root = view
+def test_hex_input_filters_invalid_chars_and_uses_hex(scientific_view) -> None:
+    calculator, root = scientific_view
     calculator.set_base(16)
     calculator.current_row.entry.insert(0, "G11+11")
     root.update_idletasks()
@@ -127,8 +135,8 @@ def test_hex_input_filters_invalid_chars_and_uses_hex(view) -> None:
     assert calculator._conversion_vars[10].get() == "34"
 
 
-def test_binary_input_filters_non_binary_digits(view) -> None:
-    calculator, root = view
+def test_binary_input_filters_non_binary_digits(scientific_view) -> None:
+    calculator, root = scientific_view
     calculator.set_base(2)
     calculator.current_row.entry.insert(0, "102+1")
     root.update_idletasks()
@@ -161,8 +169,8 @@ def test_number_keys_stay_white_and_operators_use_light_tints(view) -> None:
     assert calculator.equal_button.cget("image")
 
 
-def test_disabled_digits_follow_base(view) -> None:
-    calculator, root = view
+def test_disabled_digits_follow_base(scientific_view) -> None:
+    calculator, root = scientific_view
     calculator.set_base(2)
     assert calculator._digit_buttons["2"]._enabled is False
     assert calculator._digit_buttons["1"]._enabled is True
@@ -212,3 +220,81 @@ def test_editing_older_row_keeps_row_count(view) -> None:
     root.update()
     assert len(calculator.rows) == 2
     assert first.result_label.cget("text") == "= 6"
+
+
+def test_stray_release_does_not_insert_operator(view) -> None:
+    calculator, root = view
+    # Opening the calculator from a launcher card happens on ButtonPress; the
+    # later release must not press a keypad button in the new window.
+    calculator._digit_buttons["+"]._on_release()
+    root.update_idletasks()
+    assert calculator.current_row.entry.get() == ""
+
+
+def test_scientific_mode_defaults_to_simple(view) -> None:
+    calculator, _root = view
+    assert calculator.scientific_mode is False
+    assert calculator.base == 10
+    assert calculator._conversion_outer.winfo_manager() == ""
+    assert calculator._base_row.winfo_manager() == ""
+    assert calculator._hex_row.winfo_manager() == ""
+    assert calculator.scientific_button.cget("text") == "科学模式：关"
+
+
+def test_toggle_scientific_mode_restores_layout_order(scientific_view) -> None:
+    calculator, root = scientific_view
+    assert calculator.scientific_mode is True
+    assert calculator.scientific_button.cget("text") == "科学模式：开"
+    for widget in (
+        calculator._conversion_outer,
+        calculator._base_row,
+        calculator._hex_row,
+    ):
+        assert widget.winfo_manager() == "pack"
+
+    calculator.set_base(16)
+    calculator.set_scientific_mode(False)
+    root.update_idletasks()
+    assert calculator.scientific_mode is False
+    assert calculator.base == 10
+    assert calculator._digit_buttons["A"]._enabled is False
+    for widget in (
+        calculator._conversion_outer,
+        calculator._base_row,
+        calculator._hex_row,
+    ):
+        assert widget.winfo_manager() == ""
+
+    calculator.set_scientific_mode(True)
+    root.update_idletasks()
+    pack_order = calculator.pack_slaves()
+    assert pack_order.index(calculator._conversion_outer) < pack_order.index(
+        calculator._base_row
+    )
+    assert pack_order.index(calculator._base_row) < pack_order.index(
+        calculator._keypad
+    )
+    assert calculator._hex_row.winfo_manager() == "pack"
+
+
+def test_scientific_mode_is_persisted(tmp_path) -> None:
+    root = tk.Tk()
+    root.withdraw()
+    try:
+        first_window = tk.Toplevel(root)
+        first_window.withdraw()
+        first = CalculatorView(first_window, data_dir=tmp_path)
+        first.pack(fill="both", expand=True)
+        assert first.scientific_mode is False
+        first.set_scientific_mode(True)
+        root.update_idletasks()
+        assert (tmp_path / "settings.json").is_file()
+
+        second_window = tk.Toplevel(root)
+        second_window.withdraw()
+        second = CalculatorView(second_window, data_dir=tmp_path)
+        second.pack(fill="both", expand=True)
+        assert second.scientific_mode is True
+        assert second.scientific_button.cget("text") == "科学模式：开"
+    finally:
+        root.destroy()

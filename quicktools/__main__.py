@@ -18,6 +18,13 @@ log = logging.getLogger(__name__)
 
 _DETACH_ENV = "QUICKTOOLS_DETACHED"
 _DETACH_VALUE = "1"
+_SCREENSHOT_ACTIONS = {
+    "region": "capture_region",
+    "window": "capture_window",
+    "freeform": "capture_freeform",
+    "scroll": "capture_scroll",
+    "open": "open",
+}
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -33,6 +40,14 @@ def build_parser() -> argparse.ArgumentParser:
         "--background",
         action="store_true",
         help="后台启动（登录自启动使用；已有实例时静默退出）",
+    )
+    commands.add_argument(
+        "--screenshot",
+        nargs="?",
+        const="region",
+        choices=tuple(_SCREENSHOT_ACTIONS),
+        metavar="MODE",
+        help="触发截图：region（默认）/ window / freeform / scroll / open",
     )
     parser.add_argument(
         "--foreground",
@@ -125,11 +140,20 @@ def main(argv: list[str] | None = None) -> int:
         return run_tray_helper()
 
     start_visible = True
+    screenshot_command: str | None = None
     if args.background:
         # Login autostart: never surface the launcher. "ping" is answered
         # directly by the IPC server, so it does not trigger any UI.
         if send_command("ping"):
             return 0
+        start_visible = False
+    elif args.screenshot:
+        action = _SCREENSHOT_ACTIONS[args.screenshot]
+        screenshot_command = f"plugin screenshot {action}"
+        if send_command(screenshot_command):
+            return 0
+        # No primary instance: start hidden, then run the action once the
+        # Tk main loop is draining commands.
         start_visible = False
     elif args.toggle or args.show or args.quit:
         command = "toggle" if args.toggle else ("show" if args.show else "quit")
@@ -158,6 +182,8 @@ def main(argv: list[str] | None = None) -> int:
 
     try:
         app = QuickToolsApp(start_visible=start_visible)
+        if screenshot_command is not None:
+            app.commands.put(screenshot_command)
         app.run()
         return 0
     except Exception as exc:

@@ -1,0 +1,1 @@
+"""QuickTools screenshot plugin."""

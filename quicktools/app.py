@@ -5,6 +5,7 @@ from __future__ import annotations
 import queue
 import tkinter as tk
 from tkinter import messagebox
+from typing import Callable
 
 from . import paths
 from .config import AppSettings, HotkeySpec, load_settings, save_settings
@@ -104,6 +105,10 @@ class QuickToolsApp:
                 except (IndexError, ValueError):
                     x, y = -1, -1
                 self.launcher.show_tray_menu(x, y)
+            elif command.startswith("plugin "):
+                parts = command.split(" ", 2)
+                if len(parts) == 3:
+                    self.launcher.dispatch_plugin_action(parts[1], parts[2])
             elif command == "quit":
                 self.quit()
                 return
@@ -178,6 +183,40 @@ class QuickToolsApp:
                 pass
 
     # -------------------------------------------------------------- plugins
+    def hide_for_capture(self) -> Callable[[], None]:
+        """Hide every QuickTools window before a screenshot.
+
+        Returns an idempotent callback that restores only the windows that
+        were visible when this method was called.
+        """
+        settings_window = self.settings_window
+        restore_settings = False
+        if settings_window is not None and self._window_exists(settings_window):
+            try:
+                if settings_window.winfo_viewable():
+                    settings_window.withdraw()
+                    restore_settings = True
+            except tk.TclError:
+                pass
+        restore_others = self.launcher.hide_all_windows()
+
+        restored = False
+
+        def restore() -> None:
+            nonlocal restored
+            if restored:
+                return
+            restored = True
+            restore_others()
+            if restore_settings and self._window_exists(settings_window):
+                try:
+                    settings_window.deiconify()
+                    settings_window.lift()
+                except tk.TclError:
+                    pass
+
+        return restore
+
     def reload_plugins(self) -> tuple[int, list[str]]:
         count, errors = self.launcher.reload_plugins()
         self._refresh_status_ui()
