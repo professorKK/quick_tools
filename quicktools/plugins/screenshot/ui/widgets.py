@@ -16,6 +16,7 @@ from quicktools.ui_theme import (
     TEXT,
     Fonts,
 )
+from quicktools.window_frame import Tooltip
 
 from .icons import IconSet
 
@@ -276,7 +277,11 @@ class PlaceholderEntry(tk.Frame):
 
 
 class ModeCard(tk.Frame):
-    """Clickable capture-mode card from the redesigned home page."""
+    """Compact clickable capture-mode button for the screenshot home page.
+
+    Only the icon, mode name and shortcut are rendered; the longer explanation
+    lives in a hover tooltip so the recent screenshot list keeps the space.
+    """
 
     def __init__(
         self,
@@ -297,86 +302,118 @@ class ModeCard(tk.Frame):
             bg=BG,
             highlightbackground=BORDER,
             highlightthickness=1,
-            padx=14,
-            pady=12,
+            padx=8,
+            pady=7,
             cursor="hand2",
         )
+        self.description = description
         self._command = command
-        self._icons = icons
-        self._accent_fg = accent_fg
-        head = tk.Frame(self, bg=BG, cursor="hand2")
-        head.pack(fill="x")
-        tk.Label(
-            head,
+        self._hover = False
+        body = tk.Frame(self, bg=BG, cursor="hand2")
+        body.pack(expand=True)
+        self._body = body
+        self._icon = tk.Label(
+            body,
             bg=BG,
             image=icons.tile(
-                icon_name, size=44, bg=accent_bg, fg=accent_fg, radius=11
+                icon_name,
+                size=30,
+                bg=accent_bg,
+                fg=accent_fg,
+                radius=8,
             ),
-        ).pack(side="left")
+            cursor="hand2",
+        )
+        self._icon.pack(side="left", padx=(0, 9))
+        text = tk.Frame(body, bg=BG, cursor="hand2")
+        text.pack(side="left")
+        self._text = text
         self._title = tk.Label(
-            head,
+            text,
             text=title,
             bg=BG,
             fg=TEXT,
-            font=fonts.u(12, "bold"),
+            font=fonts.u(11, "bold"),
             cursor="hand2",
         )
-        self._title.pack(side="left", padx=(10, 0))
-        tk.Label(
-            head,
-            bg=BG,
-            image=icons.get("chevron-right", 16, MUTED),
-        ).pack(side="right")
-        self._description = tk.Label(
-            self,
-            text=description,
+        self._title.pack(anchor="w")
+        self._shortcut = tk.Label(
+            text,
+            text=shortcut,
             bg=BG,
             fg=MUTED,
-            justify="left",
-            anchor="w",
-            wraplength=280,
-            font=fonts.u(9),
-            cursor="hand2",
-        )
-        self._description.pack(fill="x", pady=(8, 8))
-        self._badge = tk.Label(
-            self,
-            text=shortcut,
-            bg=accent_bg,
-            fg=accent_fg,
             font=fonts.m(8),
-            padx=8,
-            pady=3,
             cursor="hand2",
         )
         if shortcut:
-            self._badge.pack(anchor="w")
+            self._shortcut.pack(anchor="w", pady=(1, 0))
         bind_click_recursive(self, self._on_click)
         bind_hover_recursive(self, self._on_enter, self._on_leave)
-        self.bind("<Configure>", self._on_configure)
+        self._tooltip = Tooltip(
+            self,
+            description,
+            fonts=fonts,
+            container=self,
+        )
 
     def _on_click(self, _event=None) -> None:
         self._command()
 
     def _on_enter(self, _event=None) -> None:
-        self.configure(highlightbackground=ACCENT)
-        self._title.configure(fg=ACCENT)
+        if self._hover:
+            return
+        self._hover = True
+        self._refresh_hover()
 
-    def _on_leave(self, _event=None) -> None:
-        self.configure(highlightbackground=BORDER)
-        self._title.configure(fg=TEXT)
+    def _on_leave(self, event=None) -> None:
+        if self._pointer_inside(event):
+            return
+        if not self._hover:
+            return
+        self._hover = False
+        self._refresh_hover()
 
-    def _on_configure(self, event: tk.Event) -> None:
-        if event.widget is self:
-            self._description.configure(wraplength=max(160, event.width - 28))
+    def _pointer_inside(self, event) -> bool:
+        if event is None:
+            return False
+        try:
+            under = self.winfo_containing(event.x_root, event.y_root)
+        except tk.TclError:
+            return False
+        current = under
+        while current is not None:
+            if current is self:
+                return True
+            parent_name = current.winfo_parent()
+            if not parent_name:
+                return False
+            try:
+                current = current.nametowidget(parent_name)
+            except (KeyError, tk.TclError):
+                return False
+        return False
+
+    def _refresh_hover(self) -> None:
+        bg = ACCENT_SOFT if self._hover else BG
+        fg = ACCENT if self._hover else TEXT
+        shortcut_fg = ACCENT if self._hover else MUTED
+        self.configure(
+            bg=bg,
+            highlightbackground=ACCENT if self._hover else BORDER,
+        )
+        self._body.configure(bg=bg)
+        self._icon.configure(bg=bg)
+        self._text.configure(bg=bg)
+        self._title.configure(bg=bg, fg=fg)
+        self._shortcut.configure(bg=bg, fg=shortcut_fg)
 
     def set_shortcut(self, text: str) -> None:
-        self._badge.configure(text=text)
+        self._shortcut.configure(text=text)
         if text:
-            if not self._badge.winfo_manager():
-                self._badge.pack(anchor="w")
+            if not self._shortcut.winfo_manager():
+                self._shortcut.pack(anchor="w", pady=(1, 0))
         else:
-            self._badge.pack_forget()
+            self._shortcut.pack_forget()
 
 
 class ActionLink(tk.Frame):

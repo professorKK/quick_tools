@@ -18,6 +18,7 @@ from quicktools.plugins.calculator.settings import (
     load_scientific_mode,
     save_scientific_mode,
 )
+from quicktools.plugins.calculator.settings_view import CalculatorSettingsPanel
 from quicktools.plugins.calculator.view import CalculatorView
 
 pytestmark = pytest.mark.skipif(
@@ -50,6 +51,17 @@ def make_view(root: tk.Tk, data_dir: Path | None) -> tuple[tk.Toplevel, Calculat
 def add_record(view: CalculatorView, expression: str) -> None:
     view.current_row.entry.insert(0, expression)
     view.evaluate_active()
+
+
+def make_settings_panel(
+    root: tk.Tk, view: CalculatorView
+) -> tuple[tk.Toplevel, CalculatorSettingsPanel]:
+    host = tk.Toplevel(root)
+    host.withdraw()
+    panel = CalculatorSettingsPanel(host, view)
+    panel.pack(fill="both", expand=True)
+    host.update_idletasks()
+    return host, panel
 
 
 def test_no_data_dir_starts_with_one_empty_row(root: tk.Tk) -> None:
@@ -224,24 +236,6 @@ def test_clear_scratchpad_leaves_one_empty_row(
         window.destroy()
 
 
-def test_header_button_opens_and_reuses_settings_dialog(
-    root: tk.Tk, tmp_path: Path
-) -> None:
-    window, view = make_view(root, tmp_path)
-    try:
-        assert view.scratchpad_button.cget("text") == "计算器 · 设置"
-        view.open_settings()
-        dialog = view._settings_window
-        assert dialog is not None
-        view.open_settings()
-        assert view._settings_window is dialog
-        dialog.close()
-        root.update_idletasks()
-        assert view._settings_window is None
-    finally:
-        window.destroy()
-
-
 def test_result_grouping_updates_labels_and_persists(
     root: tk.Tk, tmp_path: Path
 ) -> None:
@@ -267,97 +261,92 @@ def test_result_grouping_updates_labels_and_persists(
         window.destroy()
 
 
-def test_settings_dialog_saves_result_group_size(
+def test_settings_panel_saves_result_group_size(
     root: tk.Tk, tmp_path: Path
 ) -> None:
     window, view = make_view(root, tmp_path)
+    host = None
     try:
-        view.open_settings()
-        dialog = view._settings_window
-        assert dialog is not None
-
-        dialog.group_var.set("3")
-        dialog._save()
+        host, panel = make_settings_panel(root, view)
+        panel.group_var.set("3")
+        panel._save()
         root.update_idletasks()
 
         assert view.result_group_size == 3
         assert load_result_group_size(tmp_path) == 3
-        assert view._settings_window is None
+        assert panel.status_var.get() == "计算器设置已保存"
     finally:
+        if host is not None:
+            host.destroy()
         window.destroy()
 
 
-def test_settings_dialog_rejects_invalid_group_size(
+def test_settings_panel_rejects_invalid_group_size(
     root: tk.Tk, tmp_path: Path, monkeypatch
 ) -> None:
     window, view = make_view(root, tmp_path)
+    host = None
     try:
-        view.open_settings()
-        dialog = view._settings_window
-        assert dialog is not None
+        host, panel = make_settings_panel(root, view)
         errors: list[str] = []
         monkeypatch.setattr(
             "quicktools.plugins.calculator.settings_view.messagebox.showerror",
             lambda title, message, **kwargs: errors.append(message),
         )
-        dialog.group_var.set("11")
-        dialog._save()
+        panel.group_var.set("11")
+        panel._save()
         assert errors
-        assert view._settings_window is dialog
         assert view.result_group_size == 0
-        dialog.close()
     finally:
+        if host is not None:
+            host.destroy()
         window.destroy()
 
 
-def test_settings_dialog_saves_max_and_clears(
+def test_settings_panel_saves_max_and_clears(
     root: tk.Tk, tmp_path: Path, monkeypatch
 ) -> None:
     window, view = make_view(root, tmp_path)
+    host = None
     try:
         add_record(view, "1+1")
         add_record(view, "2+2")
-        view.open_settings()
-        dialog = view._settings_window
-        assert dialog is not None
+        host, panel = make_settings_panel(root, view)
 
-        dialog.max_var.set("1")
-        dialog._save()
+        panel.max_var.set("1")
+        panel._save()
         root.update_idletasks()
         assert view.max_records == 1
         assert load_max_records(tmp_path) == 1
 
-        view.open_settings()
-        dialog = view._settings_window
-        assert dialog is not None
         monkeypatch.setattr(
             "quicktools.plugins.calculator.settings_view.messagebox.askyesno",
             lambda *args, **kwargs: True,
         )
-        dialog._clear_all()
+        panel._clear_all()
         assert view.scratchpad_record_count() == 0
-        dialog.close()
     finally:
+        if host is not None:
+            host.destroy()
         window.destroy()
 
 
-def test_settings_dialog_rejects_invalid_max(
+def test_settings_panel_rejects_invalid_max(
     root: tk.Tk, tmp_path: Path, monkeypatch
 ) -> None:
     window, view = make_view(root, tmp_path)
+    host = None
     try:
-        view.open_settings()
-        dialog = view._settings_window
-        assert dialog is not None
+        host, panel = make_settings_panel(root, view)
         errors: list[str] = []
         monkeypatch.setattr(
             "quicktools.plugins.calculator.settings_view.messagebox.showerror",
             lambda title, message, **kwargs: errors.append(message),
         )
-        dialog.max_var.set("0")
-        dialog._save()
+        panel.max_var.set("0")
+        panel._save()
         assert errors
-        assert view._settings_window is dialog
-        dialog.close()
     finally:
+        if host is not None:
+            host.destroy()
         window.destroy()

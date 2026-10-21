@@ -5,8 +5,15 @@ import sys
 # Built-in plugins are loaded dynamically from the data directory, so
 # PyInstaller's static analysis cannot see their imports. Keep this list in
 # sync with quicktools/plugins/clipboard and quicktools/plugins/screenshot.
+# window_frame/win32_window/plugin_settings/settings_widgets/ui_icons are
+# imported dynamically by PluginBase and by the plugin editor windows.
 hiddenimports = [
     'quicktools.window_pin',
+    'quicktools.window_frame',
+    'quicktools.win32_window',
+    'quicktools.plugin_settings',
+    'quicktools.settings_widgets',
+    'quicktools.ui_icons',
     'quicktools.win32_hotkey',
     'quicktools.win32_focus',
     'PIL.Image',

@@ -42,14 +42,53 @@ def test_default_viewport_is_four_rows(view) -> None:
     assert len(calculator.rows) == 1
 
 
-def test_calculator_has_pin_button(view) -> None:
+def test_calculator_header_has_scratchpad_title_without_pin(view) -> None:
     calculator, root = view
-    assert calculator.pin_button.winfo_exists()
-    assert calculator.pin_button.pinned is False
-    calculator.pin_button.toggle()
+    assert not hasattr(calculator, "pin_button")
+    assert not hasattr(calculator, "scratchpad_button")
+    assert calculator.scratchpad_title.cget("text") == "草稿纸"
+    assert calculator.scratchpad_title.winfo_manager() == "pack"
+    assert calculator.scientific_button.winfo_exists()
+
+
+def test_shrinking_window_compacts_keypad_and_keeps_one_paper_row(view) -> None:
+    calculator, root = view
+    window = calculator.winfo_toplevel()
+    window.deiconify()
+    window.geometry("620x650")
     root.update()
-    assert calculator.pin_button.pinned is True
-    calculator.pin_button.toggle()
+    normal_key_height = calculator._digit_buttons["7"].winfo_height()
+    assert calculator._keypad_compact is False
+
+    # A plain Toplevel has no plugin frame, so its content minimum is also
+    # the window minimum.  The paper shrinks to exactly one layer and the
+    # keypad rows shrink instead of the bottom row being clipped.
+    window.geometry(f"620x{calculator.minimum_content_height()}")
+    root.update()
+    calculator._sync_paper_layout()
+
+    assert calculator.canvas.winfo_height() == pytest.approx(
+        calculator._row_height, abs=2
+    )
+    compact_key_height = calculator._digit_buttons["7"].winfo_height()
+    assert 0 < compact_key_height < normal_key_height
+    keypad_bottom = (
+        calculator._keypad.winfo_rooty()
+        - calculator.winfo_rooty()
+        + calculator._keypad.winfo_height()
+    )
+    assert keypad_bottom <= calculator.winfo_height() + 1
+    assert calculator._keypad_compact is True
+    operator = calculator.operator_buttons[0]
+    assert operator.cget("image") == ""
+    assert operator.cget("text")
+
+
+def test_scientific_mode_raises_the_minimum_content_height(view) -> None:
+    calculator, _root = view
+    simple_min = calculator.minimum_content_height()
+    calculator.set_scientific_mode(True)
+    assert calculator.minimum_content_height() > simple_min
 
 
 def test_current_row_sits_at_bottom_of_empty_paper(view) -> None:
@@ -255,12 +294,13 @@ def test_toggle_scientific_mode_restores_layout_order(scientific_view) -> None:
     calculator, root = scientific_view
     assert calculator.scientific_mode is True
     assert calculator.scientific_button.cget("text") == "科学模式：开"
-    for widget in (
-        calculator._conversion_outer,
-        calculator._base_row,
-        calculator._hex_row,
+    for widget, row in (
+        (calculator._conversion_outer, 3),
+        (calculator._base_row, 4),
+        (calculator._hex_row, 1),
     ):
-        assert widget.winfo_manager() == "pack"
+        assert widget.winfo_manager() == "grid"
+        assert int(widget.grid_info()["row"]) == row
 
     calculator.set_base(16)
     calculator.set_scientific_mode(False)
@@ -277,14 +317,10 @@ def test_toggle_scientific_mode_restores_layout_order(scientific_view) -> None:
 
     calculator.set_scientific_mode(True)
     root.update_idletasks()
-    pack_order = calculator.pack_slaves()
-    assert pack_order.index(calculator._conversion_outer) < pack_order.index(
-        calculator._base_row
-    )
-    assert pack_order.index(calculator._base_row) < pack_order.index(
-        calculator._keypad
-    )
-    assert calculator._hex_row.winfo_manager() == "pack"
+    assert int(calculator._conversion_outer.grid_info()["row"]) == 3
+    assert int(calculator._base_row.grid_info()["row"]) == 4
+    assert int(calculator._keypad.grid_info()["row"]) == 5
+    assert int(calculator._hex_row.grid_info()["row"]) == 1
 
 
 def test_scientific_mode_is_persisted(tmp_path) -> None:

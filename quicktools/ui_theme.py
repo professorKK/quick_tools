@@ -23,6 +23,8 @@ ACCENT_HOVER = "#3b82f6"
 ACCENT_DARK = "#1d4ed8"
 ACCENT_SOFT = "#eef4ff"
 ACCENT_SOFT_HOVER = "#dbeafe"
+BADGE_BG = "#e3edff"
+BADGE_BG_HOVER = "#d6e4ff"
 ON_ACCENT = "#ffffff"
 DANGER = "#c5221f"
 SUCCESS = "#15803d"
@@ -31,18 +33,76 @@ BUTTON_HOVER = "#e6e9ee"
 BUTTON_PRESSED = "#d9dee5"
 DISABLED_BG = "#f7f8fa"
 DISABLED_TEXT = "#a5abb5"
+# Settings surfaces: a soft page canvas with white rounded cards on top.
+SURFACE = "#f3f5f9"
+CARD_BG = "#ffffff"
+CARD_BORDER = "#e4e8ef"
+DIVIDER = "#eef1f5"
 
 
 @dataclass(frozen=True)
 class Fonts:
     ui: str
     mono: str
+    # Windows icon font used for title bar pin/settings glyphs; empty when
+    # the platform has no such font and callers should draw a fallback.
+    symbol: str = ""
 
     def u(self, size: int, weight: str = "normal") -> tuple[str, int, str]:
         return (self.ui, size, weight)
 
     def m(self, size: int, weight: str = "normal") -> tuple[str, int, str]:
         return (self.mono, size, weight)
+
+
+def round_rect(
+    canvas: tk.Canvas,
+    x1: float,
+    y1: float,
+    x2: float,
+    y2: float,
+    radius: float,
+    fill: str,
+    *,
+    outline: str = "",
+    width: int = 1,
+) -> int:
+    """Draw a smooth rounded rectangle on a Canvas and return its item id."""
+    radius = max(0.0, min(radius, (x2 - x1) / 2, (y2 - y1) / 2))
+    points = [
+        x1 + radius,
+        y1,
+        x2 - radius,
+        y1,
+        x2,
+        y1,
+        x2,
+        y1 + radius,
+        x2,
+        y2 - radius,
+        x2,
+        y2,
+        x2 - radius,
+        y2,
+        x1 + radius,
+        y2,
+        x1,
+        y2,
+        x1,
+        y2 - radius,
+        x1,
+        y1 + radius,
+        x1,
+        y1,
+    ]
+    return canvas.create_polygon(
+        points,
+        smooth=True,
+        splinesteps=18,
+        fill=fill,
+        outline=outline,
+        width=width,
+    )
 
 
 def enable_high_dpi() -> None:
@@ -59,9 +119,11 @@ def enable_high_dpi() -> None:
 
 def pick_fonts(root: tk.Misc) -> Fonts:
     available = set(tkfont.families(root))
+    symbol_candidates: tuple[str, ...] = ()
     if sys.platform == "win32":
         ui_candidates = ("Microsoft YaHei UI", "Microsoft YaHei", "Segoe UI", "Arial")
         mono_candidates = ("Cascadia Mono", "Consolas", "Courier New")
+        symbol_candidates = ("Segoe Fluent Icons", "Segoe MDL2 Assets")
     else:
         ui_candidates = (
             "Noto Sans CJK SC",
@@ -82,7 +144,10 @@ def pick_fonts(root: tk.Misc) -> Fonts:
         (name for name in mono_candidates if name in available),
         tkfont.nametofont("TkFixedFont").actual("family"),
     )
-    return Fonts(ui=ui, mono=mono)
+    symbol = next(
+        (name for name in symbol_candidates if name in available), ""
+    )
+    return Fonts(ui=ui, mono=mono, symbol=symbol)
 
 
 def center_on_screen(
@@ -262,6 +327,21 @@ class FlatButton(tk.Label):
         self._accent = self._active
         if self._enabled:
             self._apply_style()
+
+    def set_face(self, *, image=None, text: str = "") -> None:
+        """Switch between an icon and a text glyph without changing colors."""
+        self._idle_image = image
+        self._active_image = None
+        self._disabled_image = None
+        self.configure(text=text)
+        if self._enabled:
+            self._apply_style()
+        else:
+            self.configure(
+                bg=DISABLED_BG,
+                fg=self._disabled_fg,
+                image=image if image is not None else "",
+            )
 
     def set_idle_colors(
         self,

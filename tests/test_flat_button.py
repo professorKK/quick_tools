@@ -55,6 +55,26 @@ def test_leave_cancels_a_pending_press(root) -> None:
     assert calls == []
 
 
+def test_set_face_switches_between_icon_and_text(root) -> None:
+    image = tk.PhotoImage(master=root, width=1, height=1)
+    button = FlatButton(
+        root,
+        "",
+        lambda: None,
+        fonts=pick_fonts(root),
+        image=image,
+    )
+    assert button.cget("image")
+
+    button.set_face(image=None, text="+")
+    assert button.cget("image") == ""
+    assert button.cget("text") == "+"
+
+    button.set_face(image=image, text="")
+    assert button.cget("image")
+    assert button.cget("text") == ""
+
+
 def test_set_idle_colors_updates_idle_and_hover(root) -> None:
     button = FlatButton(
         root,

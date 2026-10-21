@@ -118,7 +118,7 @@ def setup(tmp_path: Path):
 
 def test_ui_lists_and_selects_entries(setup) -> None:
     root, _window, view, _service, _backend, text_entry, image_entry, file_entry = setup
-    assert view.pin_button.winfo_exists()
+    assert not hasattr(view, "pin_button")
     assert view._count_vars["all"].get() == "3"
     assert len(view._card_rows) == 3
 
@@ -299,13 +299,34 @@ def test_ui_copy_and_detach(setup) -> None:
     assert service._listeners == []
 
 
-def test_ui_settings_window_opens_and_closes(setup) -> None:
-    root, _window, view, _service, _backend, _text_entry, _image_entry, _file_entry = setup
+def test_ui_settings_entry_uses_shared_dialog(setup) -> None:
+    _root, _window, view, _service, _backend, _text_entry, _image_entry, _file_entry = setup
+    calls: list[bool] = []
+    view._on_open_settings = lambda: calls.append(True)
     view._open_settings()
-    root.update()
-    assert view._settings_window is not None
-    settings_window = view._settings_window
-    assert settings_window.winfo_exists()
-    view._close_settings(settings_window)
-    root.update()
-    assert view._settings_window is None
+    assert calls == [True]
+
+
+def test_clipboard_settings_panel_saves(setup, monkeypatch) -> None:
+    root, window, view, service, _backend, _text_entry, _image_entry, _file_entry = setup
+    from quicktools.plugins.clipboard.settings_view import ClipboardSettingsPanel
+
+    host = tk.Toplevel(root)
+    host.withdraw()
+    try:
+        panel = ClipboardSettingsPanel(host, view)
+        panel.pack(fill="both", expand=True)
+        root.update_idletasks()
+        panel.entries_var.set("100")
+        panel._save()
+        root.update_idletasks()
+        assert service.settings.max_entries == 100
+
+        monkeypatch.setattr(
+            "quicktools.plugins.clipboard.settings_view.messagebox.askyesno",
+            lambda *args, **kwargs: True,
+        )
+        panel._clear_history()
+        assert service.counts()["all"] == 0
+    finally:
+        host.destroy()

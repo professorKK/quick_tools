@@ -19,6 +19,7 @@ log = logging.getLogger(__name__)
 
 
 class ScreenshotPlugin(PluginBase):
+    settings_cards = True
     ACTIONS = frozenset(
         {
             "open",
@@ -223,6 +224,25 @@ class ScreenshotPlugin(PluginBase):
             return
         if self._view is view:
             self._view = None
+
+    def create_settings_ui(self, parent: tk.Misc) -> None:
+        from .ui.settings_view import ScreenshotSettingsPanel
+
+        ScreenshotSettingsPanel(
+            parent, self, self._on_settings_saved
+        ).pack(fill="both", expand=True)
+
+    def _on_settings_saved(self) -> None:
+        view = self._view
+        if view is None:
+            return
+        try:
+            view.refresh_settings()
+            recent = getattr(view, "recent_view", None)
+            if recent is not None:
+                recent.refresh()
+        except tk.TclError:
+            pass
 
     def _ensure_service(self) -> ScreenshotService | None:
         if self.service is None:

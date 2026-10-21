@@ -22,7 +22,8 @@ from .ui_theme import (
     BG,
     BORDER,
     BUTTON,
-    BUTTON_HOVER,
+    BADGE_BG,
+    BADGE_BG_HOVER,
     DANGER,
     MUTED,
     PANEL,
@@ -34,6 +35,12 @@ from .ui_theme import (
     pick_fonts,
 )
 from .win32_focus import force_foreground, is_foreground
+from .win32_window import (
+    enable_rounded_corners,
+    prepare_top_level,
+    restore as restore_window,
+)
+from .window_frame import WindowFrame, enable_drag, make_frameless
 
 if TYPE_CHECKING:
     from .app import QuickToolsApp
@@ -61,6 +68,7 @@ class Launcher:
         self.plugins: list[PluginMeta] = []
         self._errors: list[str] = []
         self._plugin_windows: dict[str, tk.Toplevel] = {}
+        self._plugin_frames: dict[str, WindowFrame] = {}
         self._background_plugins: dict[str, tuple[PluginMeta, PluginBase]] = {}
         self._background_failures: dict[str, tuple[str, str]] = {}
         self._cards: list[tk.Frame] = []
@@ -93,13 +101,17 @@ class Launcher:
         self.window.bind("<Escape>", lambda _e: self.hide())
         self.window.bind("<FocusIn>", self._on_launcher_focus_in)
         self.window.bind("<FocusOut>", self._on_launcher_focus_out)
-        self.window.minsize(640, 420)
+        self.window.minsize(720, 480)
         self.window.attributes("-topmost", True)
+        # The launcher has no system caption: its header doubles as the drag
+        # handle and the only chrome is the content itself.
+        make_frameless(self.window)
+        self.window.bind("<Map>", self._on_launcher_map, add="+")
         self._build()
         self.reload_plugins()
         # Lay out while still hidden so the first hotkey show only has to map
         # an already-built window, not run the whole geometry pass on screen.
-        self.window.geometry("800x540")
+        self.window.geometry("860x560")
         self.window.update_idletasks()
 
     # ---------------------------------------------------------------- build
@@ -109,29 +121,39 @@ class Launcher:
 
         header = tk.Frame(shell, bg=BG)
         header.pack(fill="x", pady=(0, 12))
+        self._header = header
+        drag_widgets: list[tk.Misc] = [header]
         if self._header_logo is not None:
-            tk.Label(
+            logo = tk.Label(
                 header,
                 image=self._header_logo,
                 bg=BG,
                 bd=0,
-            ).pack(side="left", padx=(0, 10))
+            )
+            logo.pack(side="left", padx=(0, 10))
+            drag_widgets.append(logo)
         titles = tk.Frame(header, bg=BG)
         titles.pack(side="left")
-        tk.Label(
+        drag_widgets.append(titles)
+        title_label = tk.Label(
             titles,
             text="快捷工具",
             bg=BG,
             fg=TEXT,
             font=self.fonts.u(20, "bold"),
-        ).pack(anchor="w")
-        tk.Label(
+        )
+        title_label.pack(anchor="w")
+        subtitle_label = tk.Label(
             titles,
             text="选择要启动的插件",
             bg=BG,
             fg=MUTED,
             font=self.fonts.u(10),
-        ).pack(anchor="w", pady=(2, 0))
+        )
+        subtitle_label.pack(anchor="w", pady=(2, 0))
+        drag_widgets.extend((title_label, subtitle_label))
+        for widget in drag_widgets:
+            enable_drag(widget, self.window)
 
         actions = tk.Frame(header, bg=BG)
         actions.pack(side="right")
@@ -202,6 +224,7 @@ class Launcher:
             width=10,
         )
         self.cards_canvas.configure(yscrollcommand=self.cards_scrollbar.set)
+        self._scrollbar_visible = True
         self.cards_scrollbar.pack(side="right", fill="y")
         self.cards_canvas.pack(side="left", fill="both", expand=True)
         self.cards_frame = tk.Frame(self.cards_canvas, bg=BG)
@@ -238,6 +261,14 @@ class Launcher:
         ).pack(side="right")
 
     # --------------------------------------------------------------- window
+    def _on_launcher_map(self, event: tk.Event) -> None:
+        if event.widget is not self.window:
+            return
+        # Keep taskbar integration, rounded corners and topmost styling after
+        # a withdraw/deiconify cycle.
+        prepare_top_level(self.window)
+        enable_rounded_corners(self.window)
+
     def show(self, *, auto_hide: bool = False) -> None:
         self._cancel_focus_job()
         self._showing = True
@@ -246,7 +277,7 @@ class Launcher:
         self._auto_hide_requested = auto_hide
         try:
             self.window.deiconify()
-            center_on_screen(self.window, 800, 540)
+            center_on_screen(self.window, 860, 560)
             self.window.lift()
             self._focus_search()
             self._activate_window()
@@ -482,6 +513,7 @@ class Launcher:
             plugin_dir=meta.folder,
             data_dir=data_dir,
             actions=actions,
+            meta=meta,
         )
 
     def _post_plugin_action(self, plugin_id: str, action: str) -> None:
@@ -656,6 +688,7 @@ class Launcher:
         entry = self._background_plugins.pop(plugin_id, None)
         if entry is None:
             return
+        self._plugin_frames.pop(plugin_id, None)
         window = self._plugin_windows.pop(plugin_id, None)
         if window is not None and self._exists(window):
             try:
@@ -695,6 +728,7 @@ class Launcher:
         self._plugin_windows.pop(meta.id, None)
 
         window: tk.Toplevel | None = None
+        frame: WindowFrame | None = None
         try:
             instance = self._instance_for(meta)
             window = tk.Toplevel(self.root)
@@ -702,10 +736,31 @@ class Launcher:
             window.title(f"{meta.name} · 快捷工具")
             self.app.apply_window_icon(window)
             window.configure(bg=BG)
+            frame = WindowFrame(
+                window,
+                title=meta.name,
+                icon=meta.display_icon,
+                fonts=self.fonts,
+                on_settings=lambda w=window, inst=instance: (
+                    self._open_plugin_settings(inst, w)
+                ),
+                on_close=lambda w=window, mid=meta.id: self._close_plugin(mid, w),
+            )
+            # Optional escape hatch for plugins that need to change their
+            # title dynamically; normal plugins do not touch this.
+            window.quicktools_frame = frame
             instance.create_ui(window)
             window.protocol(
                 "WM_DELETE_WINDOW", lambda w=window, mid=meta.id: self._close_plugin(mid, w)
             )
+            window.bind(
+                "<Destroy>",
+                lambda event, mid=meta.id, w=window: self._on_plugin_window_destroyed(
+                    event, mid, w
+                ),
+                add="+",
+            )
+            frame.raise_grips()
         except Exception as exc:
             if window is not None and self._exists(window):
                 try:
@@ -726,20 +781,55 @@ class Launcher:
 
         assert window is not None
         self._plugin_windows[meta.id] = window
+        if frame is not None:
+            self._plugin_frames[meta.id] = frame
         self.hide()
         self.window.after(20, lambda w=window: self._show_plugin_window(w))
 
     def _show_plugin_window(self, window: tk.Toplevel) -> None:
         if not self._exists(window):
             return
+        restore_window(window)
         window.deiconify()
         window.lift()
         window.focus_force()
+
+    def _open_plugin_settings(self, instance: PluginBase, window: tk.Toplevel) -> None:
+        try:
+            opener = getattr(instance, "open_settings", None)
+            if callable(opener):
+                opener(window)
+                return
+            raise PluginError("插件缺少设置入口")
+        except Exception as exc:
+            log.exception("打开插件设置失败")
+            message = str(exc) if str(exc) else exc.__class__.__name__
+            messagebox.showerror(
+                "无法打开设置",
+                f"{message}\n\n详细日志：{paths.log_file()}",
+                parent=window,
+            )
+
+    def _on_plugin_window_destroyed(
+        self, event: tk.Event, plugin_id: str, window: tk.Toplevel
+    ) -> None:
+        if event.widget is not window:
+            return
+        if self._plugin_windows.get(plugin_id) is window:
+            self._plugin_windows.pop(plugin_id, None)
+        self._plugin_frames.pop(plugin_id, None)
+        try:
+            if not self.window.winfo_exists() or not self.cards_frame.winfo_exists():
+                return
+        except tk.TclError:
+            return
+        self._refresh_cards()
 
     def _focus_window(self, window: tk.Toplevel) -> None:
         if not self._exists(window):
             return
         try:
+            restore_window(window)
             window.deiconify()
             window.lift()
             window.focus_force()
@@ -749,6 +839,7 @@ class Launcher:
     def _close_plugin(self, plugin_id: str, window: tk.Toplevel) -> None:
         if self._plugin_windows.get(plugin_id) is window:
             self._plugin_windows.pop(plugin_id, None)
+        self._plugin_frames.pop(plugin_id, None)
         try:
             window.destroy()
         except tk.TclError:
@@ -778,7 +869,9 @@ class Launcher:
             return self.plugins
         result = []
         for meta in self.plugins:
-            haystack = f"{meta.name} {meta.description} {meta.id}".casefold()
+            haystack = (
+                f"{meta.name} {meta.summary} {meta.description} {meta.id}"
+            ).casefold()
             if query in haystack:
                 result.append(meta)
         return result
@@ -818,7 +911,7 @@ class Launcher:
                         columnspan=2,
                         sticky="nsew",
                         padx=5,
-                        pady=5,
+                        pady=4,
                     )
                 else:
                     card.grid(
@@ -826,7 +919,7 @@ class Launcher:
                         column=index % 2,
                         sticky="nsew",
                         padx=5,
-                        pady=5,
+                        pady=4,
                     )
                 self._cards.append(card)
         self._update_status()
@@ -835,6 +928,7 @@ class Launcher:
         if bbox:
             self.cards_canvas.configure(scrollregion=bbox)
         self.cards_canvas.yview_moveto(0.0)
+        self._sync_cards_scrollbar()
 
     def _make_card(self, meta: PluginMeta, *, wide: bool = False) -> tk.Frame:
         card = tk.Frame(
@@ -844,126 +938,111 @@ class Launcher:
             highlightthickness=1,
             cursor="hand2",
         )
+        body = tk.Frame(card, bg=PANEL_ALT)
+        body.pack(fill="both", expand=True, padx=12, pady=9)
 
-        top = tk.Frame(card, bg=PANEL_ALT)
-        top.pack(fill="x", padx=14, pady=(12, 4))
-        badge = tk.Frame(top, bg=BUTTON, width=46, height=46)
-        badge.pack(side="left", padx=(0, 12))
-        badge.pack_propagate(False)
-        icon = tk.Label(
-            badge,
-            text=meta.display_icon,
-            bg=BUTTON,
-            fg=ACCENT,
-            font=self.fonts.u(20, "bold"),
+        badge = tk.Canvas(
+            body,
+            width=40,
+            height=40,
+            bg=PANEL_ALT,
+            highlightthickness=0,
+            bd=0,
             cursor="hand2",
         )
-        icon.pack(fill="both", expand=True)
-        title_box = tk.Frame(top, bg=PANEL_ALT)
-        title_box.pack(side="left", fill="x", expand=True)
+        badge.pack(side="left", padx=(0, 10))
+
+        def draw_badge(background: str, fill: str) -> None:
+            badge.delete("all")
+            badge.configure(bg=background)
+            points = [
+                9, 1, 31, 1, 39, 9, 39, 31, 31, 39, 9, 39, 1, 31, 1, 9, 1, 1,
+            ]
+            badge.create_polygon(
+                points,
+                smooth=True,
+                splinesteps=18,
+                fill=fill,
+                outline="",
+            )
+            badge.create_text(
+                20,
+                20,
+                text=meta.display_icon,
+                fill=ACCENT,
+                font=self.fonts.u(15, "bold"),
+            )
+
+        draw_badge(PANEL_ALT, BADGE_BG)
+
+        text_box = tk.Frame(body, bg=PANEL_ALT)
+        text_box.pack(side="left", fill="both", expand=True)
         name = tk.Label(
-            title_box,
+            text_box,
             text=meta.name,
             bg=PANEL_ALT,
             fg=TEXT,
             anchor="w",
-            font=self.fonts.u(14, "bold"),
-            cursor="hand2",
-        )
-        name.pack(fill="x")
-        version = tk.Label(
-            title_box,
-            text=f"v{meta.version}",
-            bg=PANEL_ALT,
-            fg=MUTED,
-            anchor="w",
-            font=self.fonts.u(9),
-            cursor="hand2",
-        )
-        version.pack(fill="x", pady=(2, 0))
-
-        description = tk.Label(
-            card,
-            text=meta.description or "无描述",
-            bg=PANEL_ALT,
-            fg=MUTED,
-            justify="left",
-            anchor="nw",
-            wraplength=620 if wide else 280,
-            font=self.fonts.u(10),
-            cursor="hand2",
-        )
-        description.pack(fill="both", expand=True, padx=14, pady=(0, 4))
-
-        bottom = tk.Frame(card, bg=PANEL_ALT)
-        bottom.pack(fill="x", padx=14, pady=(0, 10))
-        is_open = meta.id in self._plugin_windows and self._exists(
-            self._plugin_windows[meta.id]
-        )
-        hint = tk.Label(
-            bottom,
-            text="已打开，点击聚焦" if is_open else "点击打开",
-            bg=PANEL_ALT,
-            fg=ACCENT if not is_open else MUTED,
-            font=self.fonts.u(9),
-            cursor="hand2",
-        )
-        hint.pack(side="left")
-        arrow = tk.Label(
-            bottom,
-            text="→",
-            bg=PANEL_ALT,
-            fg=ACCENT,
             font=self.fonts.u(12, "bold"),
             cursor="hand2",
         )
-        arrow.pack(side="right")
+        name.pack(fill="x")
+        summary = tk.Label(
+            text_box,
+            text=meta.display_summary or "暂无说明",
+            bg=PANEL_ALT,
+            fg=MUTED,
+            anchor="w",
+            justify="left",
+            wraplength=650 if wide else 280,
+            font=self.fonts.u(9),
+            cursor="hand2",
+        )
+        summary.pack(fill="x", pady=(2, 0))
 
-        card_widgets = [
-            card,
-            top,
-            title_box,
-            name,
-            version,
-            description,
-            bottom,
-            hint,
-            arrow,
-        ]
-        badge_widgets = [badge, icon]
+        is_open = meta.id in self._plugin_windows and self._exists(
+            self._plugin_windows[meta.id]
+        )
+        status = tk.Label(
+            body,
+            text="已打开" if is_open else "›",
+            bg=PANEL_ALT,
+            fg=ACCENT if is_open else MUTED,
+            font=self.fonts.u(10 if is_open else 16, "bold"),
+            cursor="hand2",
+        )
+        status.pack(side="right", padx=(8, 0))
+
+        widgets = [card, body, text_box, name, summary, status]
 
         def open_here(_event=None):
             self.open_plugin(meta)
 
         def hover(_event=None):
-            for widget in card_widgets:
+            for widget in widgets:
                 try:
                     widget.configure(bg=BUTTON)
                 except tk.TclError:
                     pass
-            for widget in badge_widgets:
-                try:
-                    widget.configure(bg=BUTTON_HOVER)
-                except tk.TclError:
-                    pass
+            draw_badge(BUTTON, BADGE_BG_HOVER)
 
         def leave(_event=None):
-            for widget in card_widgets:
+            for widget in widgets:
                 try:
                     widget.configure(bg=PANEL_ALT)
                 except tk.TclError:
                     pass
-            for widget in badge_widgets:
-                try:
-                    widget.configure(bg=BUTTON)
-                except tk.TclError:
-                    pass
+            draw_badge(PANEL_ALT, BADGE_BG)
 
-        for widget in card_widgets + badge_widgets:
+        for widget in widgets:
             widget.bind("<Button-1>", open_here)
             widget.bind("<Enter>", hover)
             widget.bind("<Leave>", leave)
             self._bind_wheel(widget)
+        badge.bind("<Button-1>", open_here)
+        badge.bind("<Enter>", hover)
+        badge.bind("<Leave>", leave)
+        self._bind_wheel(badge)
         return card
 
     def _on_search_enter(self, _event=None) -> None:
@@ -975,9 +1054,27 @@ class Launcher:
         bbox = self.cards_canvas.bbox("all")
         if bbox:
             self.cards_canvas.configure(scrollregion=bbox)
+        self._sync_cards_scrollbar()
 
     def _on_cards_canvas_configure(self, event: tk.Event) -> None:
         self.cards_canvas.itemconfigure(self._cards_window, width=event.width)
+        self._sync_cards_scrollbar()
+
+    def _sync_cards_scrollbar(self) -> None:
+        """Hide the scrollbar while every plugin card fits on screen."""
+        try:
+            bbox = self.cards_canvas.bbox("all")
+            needed = bool(bbox and bbox[3] > self.cards_canvas.winfo_height() + 2)
+            if needed and not self._scrollbar_visible:
+                self.cards_scrollbar.pack(
+                    side="right", fill="y", before=self.cards_canvas
+                )
+                self._scrollbar_visible = True
+            elif not needed and self._scrollbar_visible:
+                self.cards_scrollbar.pack_forget()
+                self._scrollbar_visible = False
+        except tk.TclError:
+            pass
 
     def _bind_wheel(self, widget: tk.Misc) -> None:
         widget.bind("<Button-4>", self._on_wheel, add="+")

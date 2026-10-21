@@ -7,14 +7,12 @@ from typing import TYPE_CHECKING, Callable
 
 from quicktools.hotkey import is_wayland_session
 from quicktools.ui_theme import (
-    ACCENT,
     BG,
     MUTED,
     PANEL,
     TEXT,
     Fonts,
 )
-from quicktools.window_pin import PinButton
 
 from ..shortcuts import shortcut_label
 from .icons import IconSet
@@ -89,63 +87,25 @@ class HomePage(tk.Frame):
             text="截图助手",
             bg=BG,
             fg=TEXT,
-            font=fonts.u(22, "bold"),
-        ).pack(anchor="w")
+            font=fonts.u(17, "bold"),
+        ).pack(side="left")
         tk.Label(
             titles,
             text="快捷、便捷、专业的屏幕截图工具",
             bg=BG,
             fg=MUTED,
-            font=fonts.u(10),
-        ).pack(anchor="w", pady=(4, 0))
-
-        self.pin_button = PinButton(
-            header, self.winfo_toplevel(), fonts
-        )
-        self.pin_button.pack(side="right", padx=(10, 0))
-
-        brand = tk.Frame(
-            header,
-            bg="#eef6ff",
-            highlightbackground="#dbeafe",
-            highlightthickness=1,
-            padx=12,
-            pady=8,
-        )
-        brand.pack(side="right", padx=(16, 0))
-        tk.Label(
-            brand,
-            bg="#eef6ff",
-            image=icons.tile(
-                "camera", size=40, bg="#dbeafe", fg=ACCENT, radius=10
-            ),
-        ).pack(side="left", padx=(0, 10))
-        brand_text = tk.Frame(brand, bg="#eef6ff")
-        brand_text.pack(side="left")
-        tk.Label(
-            brand_text,
-            text="一键截图",
-            bg="#eef6ff",
-            fg=ACCENT,
-            font=fonts.u(10, "bold"),
-        ).pack(anchor="w")
-        tk.Label(
-            brand_text,
-            text="轻松编辑",
-            bg="#eef6ff",
-            fg="#3b82f6",
             font=fonts.u(9),
-        ).pack(anchor="w")
+        ).pack(side="left", padx=(10, 0))
 
         hint = self.plugin.platform_hint()
         if hint:
             hint_row = tk.Frame(self, bg=PANEL)
-            hint_row.grid(row=row, column=0, sticky="ew", pady=(14, 0))
+            hint_row.grid(row=row, column=0, sticky="ew", pady=(10, 0))
             tk.Label(
                 hint_row,
                 bg=PANEL,
                 image=icons.get("info", 15, MUTED),
-            ).pack(side="left", padx=(10, 6), pady=8)
+            ).pack(side="left", padx=(10, 6), pady=6)
             tk.Label(
                 hint_row,
                 text=hint,
@@ -155,13 +115,13 @@ class HomePage(tk.Frame):
                 justify="left",
                 wraplength=680,
                 font=fonts.u(9),
-            ).pack(side="left", fill="x", expand=True, padx=(0, 10), pady=8)
+            ).pack(side="left", fill="x", expand=True, padx=(0, 10), pady=6)
             row += 1
 
         modes = tk.Frame(self, bg=BG)
-        modes.grid(row=row, column=0, sticky="ew", pady=(16, 0))
+        modes.grid(row=row, column=0, sticky="ew", pady=(12, 0))
         row += 1
-        for column in range(2):
+        for column in range(len(_MODES)):
             modes.grid_columnconfigure(column, weight=1, uniform="mode")
         for index, (
             title,
@@ -184,16 +144,15 @@ class HomePage(tk.Frame):
                 icons=icons,
             )
             card.grid(
-                row=index // 2,
-                column=index % 2,
+                row=0,
+                column=index,
                 sticky="nsew",
-                padx=(0 if index % 2 == 0 else 6, 6 if index % 2 == 0 else 0),
-                pady=(0 if index < 2 else 6, 6 if index < 2 else 0),
+                padx=(0, 0 if index == len(_MODES) - 1 else 6),
             )
             self._mode_cards.append((action, card))
 
         recent = tk.Frame(self, bg=BG)
-        recent.grid(row=row, column=0, sticky="nsew", pady=(18, 0))
+        recent.grid(row=row, column=0, sticky="nsew", pady=(14, 0))
         self.grid_rowconfigure(row, weight=1)
         self._recent_row = row
         self.recent_view = RecentView(

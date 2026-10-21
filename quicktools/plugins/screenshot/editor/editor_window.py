@@ -26,7 +26,7 @@ from quicktools.ui_theme import (
     center_on_screen,
     pick_fonts,
 )
-from quicktools.window_pin import PinButton
+from quicktools.window_frame import WindowFrame
 
 from ..settings import ScreenshotSettings
 from ..ui.icons import IconSet
@@ -95,6 +95,14 @@ class CaptureEditor(tk.Toplevel):
         self.minsize(960, 620)
         self.protocol("WM_DELETE_WINDOW", self.close)
         self._bind_shortcuts()
+        self.frame = WindowFrame(
+            self,
+            title="编辑截图",
+            icon="S",
+            fonts=self.fonts,
+            on_close=self.close,
+        )
+        self.pin_button = self.frame.pin_button
         self._build()
         if initial_tool is not None:
             self._canvas.set_tool(initial_tool)
@@ -184,7 +192,7 @@ class CaptureEditor(tk.Toplevel):
         header.pack(fill="x", pady=(0, 10))
         tk.Label(
             header,
-            text="编辑截图",
+            text="标注编辑",
             bg=BG,
             fg=TEXT,
             font=self.fonts.u(17, "bold"),
@@ -201,8 +209,6 @@ class CaptureEditor(tk.Toplevel):
             pady=3,
             font=self.fonts.m(9),
         ).pack(side="left", padx=(10, 0))
-        self.pin_button = PinButton(header, self, self.fonts)
-        self.pin_button.pack(side="right", padx=(8, 0))
         zoom_frame = tk.Frame(header, bg=BG)
         zoom_frame.pack(side="right")
         tk.Label(

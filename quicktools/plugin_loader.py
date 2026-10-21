@@ -72,6 +72,12 @@ def _read_manifest(folder: Path, builtin: bool) -> PluginMeta:
     description = raw.get("description", "")
     if not isinstance(description, str):
         description = ""
+    summary = raw.get("summary", "")
+    if not isinstance(summary, str):
+        summary = ""
+    author = raw.get("author", "")
+    if not isinstance(author, str):
+        author = ""
     order_raw = raw.get("order", 100)
     if isinstance(order_raw, bool) or not isinstance(order_raw, (int, float)):
         order = 100
@@ -91,6 +97,8 @@ def _read_manifest(folder: Path, builtin: bool) -> PluginMeta:
         order=order,
         builtin=builtin,
         background=background,
+        summary=summary.strip(),
+        author=author.strip(),
     )
 
 
@@ -190,7 +198,13 @@ class PluginLoader:
             sys.modules.pop(module_name, None)
 
     def _invalidate(self) -> None:
-        for module_name in list(self._modules.values()):
-            sys.modules.pop(module_name, None)
+        # Keep already imported synthetic packages registered in sys.modules.
+        # The launcher rescans on every show while background plugins keep
+        # their instance alive; such an instance may import a sibling module
+        # lazily from a method (for example ``create_settings_ui``). Removing
+        # its package made those relative imports fail with
+        # ``ModuleNotFoundError: No module named '_quicktools_plugin_...'``.
+        # Every generation has a unique module name, so retained packages
+        # cannot shadow the freshly imported generation.
         self._modules.clear()
         self._classes.clear()

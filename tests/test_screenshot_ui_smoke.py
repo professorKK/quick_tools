@@ -471,7 +471,7 @@ def test_editor_pans_with_space_and_empty_select_drag(root: tk.Tk) -> None:
         on_save=lambda _image, _path: None,
         on_close=lambda _done: None,
     )
-    editor.withdraw()
+    editor.deiconify()
     root.update()
     canvas = editor._canvas
     canvas.zoom_to(3.0)
@@ -774,7 +774,7 @@ def test_editor_wheel_zoom_and_pan(root: tk.Tk) -> None:
         on_save=lambda _image, _path: None,
         on_close=lambda _done: None,
     )
-    editor.withdraw()
+    editor.deiconify()
     root.update()
     canvas = editor._canvas
     root.update()

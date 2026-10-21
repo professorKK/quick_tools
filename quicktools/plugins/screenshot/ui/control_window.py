@@ -19,7 +19,6 @@ from quicktools.ui_theme import (
 from .about_page import AboutPage
 from .home_page import HomePage
 from .icons import IconSet
-from .settings_view import SettingsDialog
 from .widgets import NavItem, bind_click_recursive
 
 if TYPE_CHECKING:
@@ -35,7 +34,6 @@ class ControlWindow(tk.Frame):
         self.status_var = tk.StringVar(value=plugin.status_text())
         self._hotkey_var = tk.StringVar()
         self._save_dir_var = tk.StringVar()
-        self._settings_dialog: SettingsDialog | None = None
         self._toast_label: tk.Label | None = None
         self._toast_job: str | None = None
         self.current_page = "home"
@@ -203,10 +201,6 @@ class ControlWindow(tk.Frame):
         self.current_page = name
         for key, item in self._nav_items.items():
             item.set_active(key == name)
-        for page in self.pages.values():
-            pin = getattr(page, "pin_button", None)
-            if pin is not None:
-                pin.refresh()
         if name == "about":
             self.about_page.refresh()
 
@@ -291,24 +285,9 @@ class ControlWindow(tk.Frame):
 
     # -------------------------------------------------------------- actions
     def _open_settings(self) -> None:
-        dialog = self._settings_dialog
-        if dialog is not None:
-            try:
-                if dialog.winfo_exists():
-                    dialog.lift()
-                    dialog.focus_force()
-                    return
-            except tk.TclError:
-                pass
-        self._settings_dialog = SettingsDialog(
-            self.winfo_toplevel(), self.plugin, self._on_settings_saved
-        )
-
-    def _on_settings_saved(self) -> None:
-        self.refresh_settings()
-        view = getattr(self, "recent_view", None)
-        if view is not None:
-            view.refresh()
+        opener = getattr(self.plugin, "open_settings", None)
+        if callable(opener):
+            opener(self.winfo_toplevel())
 
     def set_status(self, message: str) -> None:
         self.status_var.set(message)

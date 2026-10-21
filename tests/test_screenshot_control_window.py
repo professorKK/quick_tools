@@ -100,6 +100,65 @@ def _rows(control: ControlWindow):
     return control.recent_view._scroll.inner.winfo_children()
 
 
+def test_home_page_mode_cards_are_compact_with_hover_text(
+    tmp_path: Path,
+) -> None:
+    store = RecentStore(tmp_path)
+    try:
+        service = FakeService(store)
+        plugin = FakePlugin(service)
+        root = tk.Tk()
+        root.withdraw()
+        window = tk.Toplevel(root)
+        try:
+            control = ControlWindow(window, plugin)
+            control.pack(fill="both", expand=True)
+            root.update()
+
+            cards = control.home_page._mode_cards
+            assert [action for action, _card in cards] == [
+                "capture_region",
+                "capture_window",
+                "capture_freeform",
+                "capture_scroll",
+            ]
+            # One compact row, four equal columns.
+            assert [int(card.grid_info()["row"]) for _, card in cards] == [
+                0, 0, 0, 0
+            ]
+            assert [int(card.grid_info()["column"]) for _, card in cards] == [
+                0, 1, 2, 3
+            ]
+            for _action, card in cards:
+                assert card.description
+                assert card._tooltip.text == card.description
+                # The explanation only lives in the hover tooltip.
+                assert _find_label(card, card.description) is None
+                assert card._title.cget("text")
+                # The hover tip covers every child of the card.
+                assert card._title.bind("<Enter>")
+                assert card._title.bind("<Leave>")
+
+            # Header and mode bar stay a thin band; the recent list gets the
+            # remaining height.
+            assert control.home_page.fixed_height() < 240
+            recent = control.recent_view.master
+            recent_row = int(recent.grid_info()["row"])
+            assert recent.master.grid_rowconfigure(recent_row)["weight"] == 1
+
+            control.home_page._mode_cards[0][1].set_shortcut("Ctrl+Alt+1")
+            root.update()
+            assert (
+                control.home_page._mode_cards[0][1]._shortcut.cget("text")
+                == "Ctrl+Alt+1"
+            )
+        finally:
+            window.destroy()
+            root.destroy()
+    finally:
+        store.close()
+
+
 def test_control_window_scroll_search_footer_and_toast(
     tmp_path: Path,
 ) -> None:
@@ -132,18 +191,8 @@ def test_control_window_scroll_search_footer_and_toast(
             assert control.content.grid_rowconfigure(1)["weight"] == 0
             assert _find_label(control, "设置") is not None
             assert _find_label(control.footer, "设置") is None
-            assert control.home_page.pin_button.winfo_exists()
-            assert control.about_page.pin_button.winfo_exists()
-
-            control.home_page.pin_button.toggle()
-            root.update()
-            assert control.home_page.pin_button.pinned is True
-            control.show_page("about")
-            assert control.about_page.pin_button.pinned is True
-            control.about_page.pin_button.toggle()
-            root.update()
-            assert control.about_page.pin_button.pinned is False
-            control.show_page("home")
+            assert not hasattr(control.home_page, "pin_button")
+            assert not hasattr(control.about_page, "pin_button")
 
             control.recent_view._search_var.set("窗口")
             control.recent_view._refresh_from_search()

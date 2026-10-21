@@ -25,6 +25,8 @@ class PluginMeta:
     order: int = 100
     builtin: bool = False
     background: bool = False
+    summary: str = ""
+    author: str = ""
 
     @property
     def display_icon(self) -> str:
@@ -35,6 +37,25 @@ class PluginMeta:
             return icon[:2]
         name = self.name.strip()
         return name[:1].upper() if name else "◆"
+
+    @property
+    def display_summary(self) -> str:
+        """One-line text for the launcher card.
+
+        ``summary`` is the preferred source. When a manifest only has the
+        detailed ``description``, use its first sentence so cards stay compact.
+        """
+        text = " ".join((self.summary or "").split())
+        if not text:
+            text = " ".join((self.description or "").split())
+            for separator in ("。", "；", ".", "!", "！"):
+                index = text.find(separator)
+                if 0 < index < 60:
+                    text = text[: index + 1]
+                    break
+        if len(text) > 46:
+            text = text[:45].rstrip("，、,;； ") + "…"
+        return text
 
 
 def _is_emoji_like(text: str) -> bool:
@@ -71,6 +92,9 @@ class PluginContext:
 
     A plugin creates its UI inside the ``window`` passed to
     :meth:`PluginBase.create_ui`. ``data_dir`` is private to the plugin.
+    ``meta`` carries the manifest information (name, version, summary,
+    detailed description) used by the shared settings/about dialog. It is
+    ``None`` only for contexts built by tests or very old hosts.
     """
 
     root: Any
@@ -78,17 +102,45 @@ class PluginContext:
     plugin_dir: Path
     data_dir: Path
     actions: PluginActions | None = None
+    meta: PluginMeta | None = None
 
 
 class PluginBase(ABC):
     """Base class every QuickTools plugin must inherit from."""
 
+    # Set this to True when ``create_settings_ui`` builds its own rounded
+    # cards on the page background. Otherwise the host wraps the returned
+    # content in one shared card so third-party pages still look integrated.
+    settings_cards = False
+
     def __init__(self, context: PluginContext) -> None:
         self.context = context
+        self._settings_dialog: Any = None
 
     @abstractmethod
     def create_ui(self, window: Any) -> None:
         """Populate the Toplevel window owned by the launcher."""
+
+    def create_settings_ui(self, parent: Any) -> None:
+        """Fill the settings page of the shared plugin settings dialog.
+
+        Optional. The framework always provides the title bar, the settings
+        shell and an About page; override this method to add options for your
+        plugin. Use ``parent`` as the master widget and pack/grid inside it.
+        The default is an empty page.
+        """
+
+    def open_settings(self, master: Any = None) -> bool:
+        """Open the shared settings/about dialog for this plugin.
+
+        The launcher calls this from the title bar settings button. Plugins
+        normally do not need to override it; implement
+        :meth:`create_settings_ui` instead. Return ``True`` when the dialog
+        was shown.
+        """
+        from .plugin_settings import open_plugin_settings
+
+        return open_plugin_settings(self, master)
 
     def start_service(self) -> None:
         """Start background work for a manifest marked ``background``.

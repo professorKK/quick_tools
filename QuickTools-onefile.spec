@@ -18,6 +18,11 @@ from pathlib import Path
 
 hiddenimports = [
     'quicktools.window_pin',
+    'quicktools.window_frame',
+    'quicktools.win32_window',
+    'quicktools.plugin_settings',
+    'quicktools.settings_widgets',
+    'quicktools.ui_icons',
     'quicktools.win32_hotkey',
     'quicktools.win32_focus',
     'PIL.Image',

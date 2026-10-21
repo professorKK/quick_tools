@@ -1,4 +1,4 @@
-"""Basic screenshot plugin settings dialog."""
+"""Screenshot plugin settings embedded in the shared settings dialog."""
 
 from __future__ import annotations
 
@@ -8,17 +8,24 @@ from tkinter import filedialog, messagebox, ttk
 from typing import TYPE_CHECKING, Callable
 
 from quicktools.config import HotkeySpec
+from quicktools.settings_widgets import (
+    Card,
+    SectionHeader,
+    SettingsRow,
+    ToggleRow,
+)
 from quicktools.ui_theme import (
-    BG,
-    BORDER,
-    FlatButton,
+    ACCENT,
+    CARD_BG,
+    DANGER,
     MUTED,
-    PANEL,
+    SURFACE,
     TEXT,
+    FlatButton,
     center_on_screen,
     pick_fonts,
 )
-
+from quicktools.window_frame import WindowFrame
 
 if TYPE_CHECKING:
     from ..plugin import ScreenshotPlugin
@@ -85,14 +92,26 @@ class _HotkeyRecorder(tk.Toplevel):
         self._candidate: HotkeySpec | None = None
         self._closed = False
         self.title("录制截图快捷键")
-        self.configure(bg=BG)
+        self.configure(bg=SURFACE)
         self.resizable(False, False)
         self.transient(master)
         self.protocol("WM_DELETE_WINDOW", self._cancel)
         self.bind("<KeyPress>", self._on_key_press)
         self.bind("<KeyRelease>", self._on_key_release)
+        self.frame = WindowFrame(
+            self,
+            title="录制截图快捷键",
+            icon="K",
+            fonts=fonts,
+            dialog=True,
+            pin=False,
+            minimize=False,
+            maximize=False,
+            resizable=False,
+            on_close=self._cancel,
+        )
         self._build()
-        center_on_screen(self, 460, 260, parent=master)
+        center_on_screen(self, 520, 400, parent=master)
         self.after(30, self._grab)
 
     def _grab(self) -> None:
@@ -103,27 +122,24 @@ class _HotkeyRecorder(tk.Toplevel):
             pass
 
     def _build(self) -> None:
-        shell = tk.Frame(self, bg=BG, padx=20, pady=18)
+        shell = tk.Frame(self, bg=SURFACE, padx=20, pady=18)
         shell.pack(fill="both", expand=True)
-        tk.Label(
+        SectionHeader(
             shell,
-            text="按下新的截图快捷键",
-            bg=BG,
-            fg=TEXT,
-            font=self.fonts.u(14, "bold"),
-        ).pack(anchor="w")
-        tk.Label(
-            shell,
-            text="必须包含至少一个 Ctrl / Alt / Shift / Super 修饰键。按 Esc 取消。",
-            bg=BG,
-            fg=MUTED,
-            font=self.fonts.u(9),
-        ).pack(anchor="w", pady=(4, 12))
+            "按下新的截图快捷键",
+            "必须包含至少一个 Ctrl / Alt / Shift / Super 修饰键。按 Esc 取消。",
+            bg=SURFACE,
+            fonts=self.fonts,
+            wraplength=430,
+        ).pack(fill="x", pady=(0, 10))
+
+        card = Card(shell)
+        card.pack(fill="x")
         self.preview_var = tk.StringVar(value="等待按键…")
         tk.Label(
-            shell,
+            card.body,
             textvariable=self.preview_var,
-            bg=PANEL,
+            bg=CARD_BG,
             fg=TEXT,
             font=self.fonts.m(15, "bold"),
             padx=16,
@@ -132,14 +148,16 @@ class _HotkeyRecorder(tk.Toplevel):
         ).pack(fill="x")
         self.hint_var = tk.StringVar(value="")
         tk.Label(
-            shell,
+            card.body,
             textvariable=self.hint_var,
-            bg=BG,
-            fg="#c5221f",
+            bg=CARD_BG,
+            fg=DANGER,
+            anchor="w",
             font=self.fonts.u(9),
-        ).pack(anchor="w", pady=(5, 8))
-        buttons = tk.Frame(shell, bg=BG)
-        buttons.pack(fill="x", pady=(8, 0))
+        ).pack(fill="x", pady=(6, 0))
+
+        buttons = tk.Frame(shell, bg=SURFACE)
+        buttons.pack(fill="x", pady=(12, 0))
         self.apply_button = FlatButton(
             buttons,
             "使用此快捷键",
@@ -225,164 +243,219 @@ class _HotkeyRecorder(tk.Toplevel):
         self.on_done()
 
 
-class SettingsDialog(tk.Toplevel):
+class ScreenshotSettingsPanel(tk.Frame):
+    """Screenshot settings page embedded in the shared plugin dialog."""
+
     def __init__(
         self,
         master: tk.Misc,
         plugin: "ScreenshotPlugin",
         on_saved: Callable[[], None],
     ) -> None:
-        super().__init__(master)
+        super().__init__(master, bg=SURFACE)
         self.plugin = plugin
         self.on_saved = on_saved
-        self.fonts = pick_fonts(self)
+        self.fonts = pick_fonts(self.winfo_toplevel())
         self.settings = plugin.settings
         self._recording = False
-        self.title("截图设置 · 快捷工具")
-        self.configure(bg=BG)
-        self.resizable(True, True)
-        self.minsize(620, 600)
-        self.transient(master)
-        self.protocol("WM_DELETE_WINDOW", self.close)
-        self.bind("<Escape>", lambda _event: self.close())
+        self.status_var = tk.StringVar(value="")
         self._build()
-        height = min(820, max(620, int(self.winfo_screenheight() * 0.88)))
-        center_on_screen(self, 700, height, parent=master)
-        self.after(30, self._grab)
+        self.bind("<Destroy>", self._on_destroy, add="+")
 
-    def _grab(self) -> None:
-        try:
-            self.grab_set()
-            self.focus_force()
-        except tk.TclError:
-            pass
+    def _on_destroy(self, event: tk.Event) -> None:
+        if event.widget is not self:
+            return
+        if self._recording:
+            self.plugin.resume_hotkey()
+            self._recording = False
 
     def _build(self) -> None:
-        shell = tk.Frame(self, bg=BG, padx=22, pady=18)
-        shell.pack(fill="both", expand=True)
+        SectionHeader(
+            self,
+            "截图与保存",
+            "设置截图保存位置、图片格式和快捷键。修改后点击保存生效。",
+            bg=SURFACE,
+            fonts=self.fonts,
+            wraplength=560,
+        ).pack(fill="x", pady=(0, 10))
+
+        save_card = Card(self)
+        save_card.pack(fill="x", pady=(0, 12))
+        save_body = save_card.body
         tk.Label(
-            shell,
-            text="截图设置",
-            bg=BG,
+            save_body,
+            text="保存位置与格式",
+            bg=CARD_BG,
             fg=TEXT,
-            font=self.fonts.u(17, "bold"),
-        ).pack(anchor="w", pady=(0, 12))
+            anchor="w",
+            font=self.fonts.u(10, "bold"),
+        ).pack(fill="x", pady=(0, 2))
 
-        panel = tk.Frame(
-            shell, bg=PANEL, highlightbackground=BORDER, highlightthickness=1
+        save_dir_row = SettingsRow(
+            save_body,
+            "保存目录",
+            description="截图和最近记录都保存在这个目录下。",
+            bg=CARD_BG,
+            fonts=self.fonts,
         )
-        panel.pack(fill="x")
-        body = tk.Frame(panel, bg=PANEL, padx=16, pady=14)
-        body.pack(fill="x")
-        body.grid_columnconfigure(1, weight=1)
-
-        row = 0
-        tk.Label(
-            body, text="保存目录", bg=PANEL, fg=TEXT, font=self.fonts.u(10)
-        ).grid(row=row, column=0, sticky="w", pady=4)
-        self.save_dir_var = tk.StringVar(value=str(self.settings.resolved_save_dir()))
+        save_dir_row.pack(fill="x")
+        self.save_dir_var = tk.StringVar(
+            value=str(self.settings.resolved_save_dir())
+        )
+        control = save_dir_row.control
         tk.Entry(
-            body,
+            control,
             textvariable=self.save_dir_var,
             bg="#ffffff",
             fg=TEXT,
             insertbackground=TEXT,
             relief="flat",
-            highlightbackground=BORDER,
+            highlightbackground="#d8dde5",
             highlightthickness=1,
-            font=self.fonts.u(10),
-        ).grid(row=row, column=1, sticky="ew", padx=(10, 6), pady=4)
+            width=30,
+            font=self.fonts.u(9),
+        ).pack(side="left")
         FlatButton(
-            body,
+            control,
             "浏览",
             self._browse_dir,
             fonts=self.fonts,
             font_size=9,
             padx=10,
             pady=5,
-        ).grid(row=row, column=2, pady=4)
+        ).pack(side="left", padx=(6, 0))
 
-        row += 1
-        tk.Label(
-            body, text="图片格式", bg=PANEL, fg=TEXT, font=self.fonts.u(10)
-        ).grid(row=row, column=0, sticky="w", pady=4)
+        format_row = SettingsRow(
+            save_body,
+            "图片格式",
+            bg=CARD_BG,
+            fonts=self.fonts,
+        )
+        format_row.pack(fill="x")
         current_format = next(
-            (label for label, value in _FORMATS if value == self.settings.image_format),
+            (
+                label
+                for label, value in _FORMATS
+                if value == self.settings.image_format
+            ),
             "PNG",
         )
         self.format_var = tk.StringVar(value=current_format)
         ttk.Combobox(
-            body,
+            format_row.control,
             textvariable=self.format_var,
             values=[label for label, _value in _FORMATS],
             state="readonly",
             width=12,
-        ).grid(row=row, column=1, sticky="w", padx=(10, 6), pady=4)
+        ).pack()
 
-        row += 1
-        tk.Label(
-            body, text="JPEG 质量", bg=PANEL, fg=TEXT, font=self.fonts.u(10)
-        ).grid(row=row, column=0, sticky="w", pady=4)
+        quality_row = SettingsRow(
+            save_body,
+            "JPEG 质量",
+            description="仅 JPEG 格式使用，数值越高文件越大。",
+            bg=CARD_BG,
+            fonts=self.fonts,
+        )
+        quality_row.pack(fill="x")
         self.quality_var = tk.StringVar(value=str(self.settings.jpeg_quality))
         ttk.Spinbox(
-            body, from_=50, to=100, textvariable=self.quality_var, width=8
-        ).grid(row=row, column=1, sticky="w", padx=(10, 6), pady=4)
+            quality_row.control,
+            from_=50,
+            to=100,
+            textvariable=self.quality_var,
+            width=8,
+        ).pack()
 
-        row += 1
-        tk.Label(
-            body, text="最近截图上限", bg=PANEL, fg=TEXT, font=self.fonts.u(10)
-        ).grid(row=row, column=0, sticky="w", pady=4)
+        recent_row = SettingsRow(
+            save_body,
+            "最近截图上限",
+            description="超过上限时自动清理最旧的截图。",
+            bg=CARD_BG,
+            fonts=self.fonts,
+            last=True,
+        )
+        recent_row.pack(fill="x")
         self.recent_var = tk.StringVar(value=str(self.settings.recent_limit))
         ttk.Spinbox(
-            body, from_=10, to=5000, textvariable=self.recent_var, width=8
-        ).grid(row=row, column=1, sticky="w", padx=(10, 6), pady=4)
+            recent_row.control,
+            from_=10,
+            to=5000,
+            textvariable=self.recent_var,
+            width=8,
+        ).pack()
 
-        row += 1
+        hotkey_card = Card(self)
+        hotkey_card.pack(fill="x", pady=(0, 12))
+        hotkey_body = hotkey_card.body
         tk.Label(
-            body, text="截图快捷键", bg=PANEL, fg=TEXT, font=self.fonts.u(10)
-        ).grid(row=row, column=0, sticky="w", pady=4)
-        hotkey_row = tk.Frame(body, bg=PANEL)
-        hotkey_row.grid(row=row, column=1, columnspan=2, sticky="ew", padx=(10, 0), pady=4)
-        self.hotkey_var = tk.StringVar(value=self.settings.hotkey.display())
-        tk.Label(
-            hotkey_row,
-            textvariable=self.hotkey_var,
-            bg=PANEL,
+            hotkey_body,
+            text="快捷键",
+            bg=CARD_BG,
             fg=TEXT,
+            anchor="w",
+            font=self.fonts.u(10, "bold"),
+        ).pack(fill="x", pady=(0, 2))
+        hotkey_row = SettingsRow(
+            hotkey_body,
+            "截图快捷键",
+            description="按下组合键后立即开始矩形截图。",
+            bg=CARD_BG,
+            fonts=self.fonts,
+        )
+        hotkey_row.pack(fill="x")
+        self.hotkey_var = tk.StringVar(
+            value=self.settings.hotkey.display()
+        )
+        tk.Label(
+            hotkey_row.control,
+            textvariable=self.hotkey_var,
+            bg=CARD_BG,
+            fg=ACCENT,
             font=self.fonts.m(11, "bold"),
-        ).pack(side="left")
+        ).pack(side="left", padx=(0, 8))
         FlatButton(
-            hotkey_row,
+            hotkey_row.control,
             "录制",
             self._record_hotkey,
             fonts=self.fonts,
             font_size=9,
             padx=10,
             pady=5,
-        ).pack(side="left", padx=(10, 0))
+        ).pack(side="left")
         self.hotkey_enabled_var = tk.BooleanVar(
             value=self.settings.hotkey_enabled
         )
-        ttk.Checkbutton(
-            hotkey_row,
-            text="启用",
-            variable=self.hotkey_enabled_var,
-        ).pack(side="left", padx=(10, 0))
+        ToggleRow(
+            hotkey_body,
+            "启用全局快捷键",
+            self.hotkey_enabled_var,
+            description="关闭后仍可在截图助手中点击按钮截图。",
+            bg=CARD_BG,
+            fonts=self.fonts,
+            last=True,
+        ).pack(fill="x")
 
-        scroll_panel = tk.Frame(
-            shell, bg=PANEL, highlightbackground=BORDER, highlightthickness=1
-        )
-        scroll_panel.pack(fill="x", pady=(10, 0))
-        scroll_body = tk.Frame(scroll_panel, bg=PANEL, padx=16, pady=12)
-        scroll_body.pack(fill="x")
-        scroll_body.grid_columnconfigure(1, weight=1)
+        scroll_card = Card(self)
+        scroll_card.pack(fill="x", pady=(0, 12))
+        scroll_body = scroll_card.body
         tk.Label(
             scroll_body,
             text="滚动截图（Windows/X11）",
-            bg=PANEL,
+            bg=CARD_BG,
             fg=TEXT,
+            anchor="w",
             font=self.fonts.u(10, "bold"),
-        ).grid(row=0, column=0, columnspan=2, sticky="w", pady=(0, 6))
+        ).pack(fill="x")
+        tk.Label(
+            scroll_body,
+            text="滚动截图是尽力而为的拼接，低置信度时会提前停止。",
+            bg=CARD_BG,
+            fg=MUTED,
+            anchor="w",
+            justify="left",
+            wraplength=520,
+            font=self.fonts.u(8),
+        ).pack(fill="x", pady=(2, 4))
         scroll_fields = (
             ("滚动格数", "scroll_notches", self.settings.scroll_notches, 1, 20),
             (
@@ -415,38 +488,54 @@ class SettingsDialog(tk.Toplevel):
             ),
         )
         self._scroll_vars: dict[str, tk.StringVar] = {}
-        for index, (label, key, value, low, high) in enumerate(scroll_fields, start=1):
-            tk.Label(
-                scroll_body, text=label, bg=PANEL, fg=TEXT, font=self.fonts.u(9)
-            ).grid(row=index, column=0, sticky="w", pady=3)
+        for index, (label, key, value, low, high) in enumerate(scroll_fields):
+            row = SettingsRow(
+                scroll_body,
+                label,
+                bg=CARD_BG,
+                fonts=self.fonts,
+                last=index == len(scroll_fields) - 1,
+                padding=(0, 6),
+            )
+            row.pack(fill="x")
             var = tk.StringVar(value=str(value))
             self._scroll_vars[key] = var
             ttk.Spinbox(
-                scroll_body,
+                row.control,
                 from_=low,
                 to=high,
                 textvariable=var,
                 width=8,
-            ).grid(row=index, column=1, sticky="w", padx=(10, 0), pady=3)
+            ).pack()
 
         tk.Label(
-            shell,
+            self,
             text=(
                 "Wayland 下应用内全局快捷键不可用，请把系统快捷键绑定到 "
                 "quicktools --screenshot region。"
             ),
-            bg=BG,
+            bg=SURFACE,
             fg=MUTED,
             justify="left",
             wraplength=600,
             font=self.fonts.u(9),
-        ).pack(anchor="w", pady=(10, 0))
+        ).pack(anchor="w", pady=(2, 0))
 
-        buttons = tk.Frame(shell, bg=BG)
-        buttons.pack(fill="x", pady=(18, 0))
+        self._status_label = tk.Label(
+            self,
+            textvariable=self.status_var,
+            bg=SURFACE,
+            fg=ACCENT,
+            anchor="w",
+            font=self.fonts.u(9),
+        )
+        self._status_label.pack(anchor="w", fill="x", pady=(8, 0))
+
+        buttons = tk.Frame(self, bg=SURFACE)
+        buttons.pack(fill="x", pady=(12, 0))
         FlatButton(
             buttons,
-            "保存",
+            "保存设置",
             self._save,
             fonts=self.fonts,
             accent=True,
@@ -454,19 +543,10 @@ class SettingsDialog(tk.Toplevel):
             padx=16,
             pady=8,
         ).pack(side="right")
-        FlatButton(
-            buttons,
-            "取消",
-            self.close,
-            fonts=self.fonts,
-            font_size=10,
-            padx=16,
-            pady=8,
-        ).pack(side="right", padx=(0, 8))
 
     def _browse_dir(self) -> None:
         selected = filedialog.askdirectory(
-            parent=self,
+            parent=self.winfo_toplevel(),
             title="选择截图保存目录",
             initialdir=self.save_dir_var.get() or None,
         )
@@ -487,11 +567,29 @@ class SettingsDialog(tk.Toplevel):
             self._recording = False
             self.plugin.resume_hotkey()
 
-        _HotkeyRecorder(self, self.fonts, apply, done)
+        _HotkeyRecorder(self.winfo_toplevel(), self.fonts, apply, done)
+
+    def _status(self, message: str, *, error: bool = False) -> None:
+        self.status_var.set(message)
+        try:
+            self._status_label.configure(fg=DANGER if error else ACCENT)
+        except tk.TclError:
+            pass
+        host = self.winfo_toplevel()
+        setter = getattr(host, "set_status", None)
+        if callable(setter):
+            try:
+                setter(message, error=error)
+            except Exception:
+                pass
 
     def _save(self) -> None:
         format_value = next(
-            (value for label, value in _FORMATS if label == self.format_var.get()),
+            (
+                value
+                for label, value in _FORMATS
+                if label == self.format_var.get()
+            ),
             "png",
         )
         try:
@@ -502,7 +600,9 @@ class SettingsDialog(tk.Toplevel):
             }
         except ValueError:
             messagebox.showerror(
-                "设置错误", "质量、最近截图上限和滚动参数必须是整数。", parent=self
+                "设置错误",
+                "质量、最近截图上限和滚动参数必须是整数。",
+                parent=self.winfo_toplevel(),
             )
             return
         try:
@@ -516,17 +616,10 @@ class SettingsDialog(tk.Toplevel):
             )
         except Exception as exc:
             log.exception("保存截图设置失败")
-            messagebox.showerror("保存失败", str(exc), parent=self)
+            messagebox.showerror(
+                "保存失败", str(exc), parent=self.winfo_toplevel()
+            )
+            self._status(f"保存失败：{exc}", error=True)
             return
         self.on_saved()
-        self.close()
-
-    def close(self) -> None:
-        if self._recording:
-            self.plugin.resume_hotkey()
-            self._recording = False
-        try:
-            self.grab_release()
-        except tk.TclError:
-            pass
-        self.destroy()
+        self._status("截图设置已保存")

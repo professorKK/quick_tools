@@ -6,6 +6,7 @@ import logging
 import tkinter as tk
 from pathlib import Path
 from tkinter import messagebox
+from typing import Callable
 
 from PIL import Image, ImageTk
 from quicktools.ui_theme import (
@@ -22,10 +23,8 @@ from quicktools.ui_theme import (
     TEXT,
     FlatButton,
     Fonts,
-    center_on_screen,
     pick_fonts,
 )
-from quicktools.window_pin import PinButton
 
 from .models import (
     ClipboardEntry,
@@ -41,7 +40,6 @@ from .platform_utils import (
     format_size,
     format_time,
     middle_ellipsis,
-    open_directory,
     preview_text,
     reveal_path,
     source_label,
@@ -68,10 +66,12 @@ class ClipboardView(tk.Frame):
         master: tk.Misc,
         service: ClipboardService | None,
         startup_error: str = "",
+        on_open_settings: Callable[[], None] | None = None,
     ) -> None:
         super().__init__(master, bg=BG)
         self.service = service
         self._startup_error = startup_error
+        self._on_open_settings = on_open_settings
         self.fonts: Fonts = pick_fonts(self.winfo_toplevel())
         self._detached = False
         self._listener = self._on_service_event
@@ -81,7 +81,6 @@ class ClipboardView(tk.Frame):
         self._newest_first = True
         self._search_job: str | None = None
         self._flash_job: str | None = None
-        self._settings_window: tk.Toplevel | None = None
         self._card_rows: dict[int, list[tk.Widget]] = {}
         self._card_labels: dict[int, dict[str, tk.Label]] = {}
         self._current_entry: ClipboardEntry | None = None
@@ -284,10 +283,6 @@ class ClipboardView(tk.Frame):
         panel = tk.Frame(self, bg=BG, padx=16, pady=14)
         header = tk.Frame(panel, bg=BG)
         header.pack(fill="x")
-        self.pin_button = PinButton(
-            header, self.winfo_toplevel(), self.fonts
-        )
-        self.pin_button.pack(side="right")
         self._detail_badge_holder = tk.Frame(header, bg=BG)
         self._detail_badge_holder.pack(side="left", padx=(0, 12))
         titles = tk.Frame(header, bg=BG)
@@ -1444,302 +1439,9 @@ class ClipboardView(tk.Frame):
             )
             return
         self._flush_text_edit()
-        existing = self._settings_window
-        if existing is not None:
-            try:
-                if existing.winfo_exists():
-                    existing.deiconify()
-                    existing.lift()
-                    existing.focus_force()
-                    return
-            except tk.TclError:
-                pass
-        window = tk.Toplevel(self)
-        self._settings_window = window
-        window.title("剪贴板设置 · 快捷工具")
-        window.configure(bg=BG)
-        window.transient(self.winfo_toplevel())
-        window.protocol("WM_DELETE_WINDOW", lambda: self._close_settings(window))
-        window.bind("<Destroy>", self._settings_destroyed, add="+")
-        center_on_screen(window, 560, 660, self.winfo_toplevel())
-
-        shell = tk.Frame(window, bg=BG, padx=22, pady=18)
-        shell.pack(fill="both", expand=True)
-        tk.Label(
-            shell,
-            text="剪贴板设置",
-            bg=BG,
-            fg=TEXT,
-            anchor="w",
-            font=self.fonts.u(16, "bold"),
-        ).pack(fill="x", pady=(0, 10))
-
-        status = self.service.backend_status
-        status_box = self._bordered(shell)
-        status_box.pack(fill="x", pady=(0, 10))
-        tk.Label(
-            status_box,
-            text=f"监听模式：{status.mode if status.available else status.detail}",
-            bg=PANEL_ALT,
-            fg=TEXT if status.available else DANGER,
-            anchor="w",
-            justify="left",
-            wraplength=480,
-            font=self.fonts.u(9, "bold"),
-        ).pack(fill="x", padx=10, pady=(8, 2))
-        if status.detail and status.available:
-            tk.Label(
-                status_box,
-                text=status.detail,
-                bg=PANEL_ALT,
-                fg=MUTED,
-                anchor="w",
-                justify="left",
-                wraplength=480,
-                font=self.fonts.u(8),
-            ).pack(fill="x", padx=10, pady=(0, 8))
-        if status.install_hint:
-            tk.Label(
-                status_box,
-                text=status.install_hint,
-                bg=PANEL_ALT,
-                fg="#b45309",
-                anchor="w",
-                justify="left",
-                wraplength=480,
-                font=self.fonts.u(8),
-            ).pack(fill="x", padx=10, pady=(0, 8))
-
-        form = tk.Frame(shell, bg=BG)
-        form.pack(fill="x")
-        recording_var = tk.BooleanVar(value=self.service.settings.recording)
-        images_var = tk.BooleanVar(value=self.service.settings.capture_images)
-        files_var = tk.BooleanVar(value=self.service.settings.capture_files)
-        for text, variable in (
-            ("启用自动记录", recording_var),
-            ("记录复制的图片", images_var),
-            ("记录复制的文件列表", files_var),
-        ):
-            tk.Checkbutton(
-                form,
-                text=text,
-                variable=variable,
-                bg=BG,
-                fg=TEXT,
-                activebackground=BG,
-                activeforeground=TEXT,
-                selectcolor=BG,
-                anchor="w",
-                font=self.fonts.u(10),
-                highlightthickness=0,
-                bd=0,
-            ).pack(fill="x", pady=2)
-
-        capacity = tk.Frame(shell, bg=BG)
-        capacity.pack(fill="x", pady=(10, 0))
-        entries_var = tk.StringVar(value=str(self.service.settings.max_entries))
-        image_mb_var = tk.StringVar(value=str(self.service.settings.max_image_mb))
-        self._settings_spin(
-            capacity,
-            "历史记录上限（条）",
-            entries_var,
-            50,
-            5000,
-            50,
-        )
-        self._settings_spin(
-            capacity,
-            "图片总容量上限（MB）",
-            image_mb_var,
-            10,
-            2000,
-            10,
-        )
-
-        note = tk.Label(
-            shell,
-            text=(
-                "X11 下需要 XFixes 支持；Wayland 需要安装 wl-clipboard，"
-                "且部分合成器限制后台读取。文件只记录原始路径，不复制文件内容。"
-            ),
-            bg=BG,
-            fg=MUTED,
-            anchor="w",
-            justify="left",
-            wraplength=500,
-            font=self.fonts.u(8),
-        )
-        note.pack(fill="x", pady=(12, 10))
-
-        buttons = tk.Frame(shell, bg=BG)
-        buttons.pack(fill="x", side="bottom")
-        FlatButton(
-            buttons,
-            "保存设置",
-            lambda: self._save_settings(
-                window,
-                recording_var,
-                images_var,
-                files_var,
-                entries_var,
-                image_mb_var,
-            ),
-            fonts=self.fonts,
-            accent=True,
-            font_size=10,
-            padx=14,
-            pady=8,
-        ).pack(side="left")
-        FlatButton(
-            buttons,
-            "清空全部历史",
-            lambda: self._clear_history(window),
-            fonts=self.fonts,
-            font_size=10,
-            padx=12,
-            pady=8,
-            fg=DANGER,
-        ).pack(side="left", padx=(8, 0))
-        FlatButton(
-            buttons,
-            "打开数据目录",
-            lambda: self._open_data_dir(),
-            fonts=self.fonts,
-            font_size=10,
-            padx=12,
-            pady=8,
-        ).pack(side="left", padx=(8, 0))
-        FlatButton(
-            buttons,
-            "关闭",
-            lambda: self._close_settings(window),
-            fonts=self.fonts,
-            font_size=10,
-            padx=12,
-            pady=8,
-        ).pack(side="right")
-
-        try:
-            window.grab_set()
-        except tk.TclError:
-            pass
-        window.focus_force()
-
-    def _settings_spin(
-        self,
-        parent: tk.Misc,
-        label: str,
-        variable: tk.StringVar,
-        low: int,
-        high: int,
-        step: int,
-    ) -> None:
-        row = tk.Frame(parent, bg=BG)
-        row.pack(fill="x", pady=3)
-        tk.Label(
-            row,
-            text=label,
-            bg=BG,
-            fg=TEXT,
-            anchor="w",
-            font=self.fonts.u(9),
-        ).pack(side="left")
-        spin = tk.Spinbox(
-            row,
-            from_=low,
-            to=high,
-            increment=step,
-            textvariable=variable,
-            width=8,
-            bg=PANEL,
-            fg=TEXT,
-            buttonbackground=BUTTON,
-            relief="flat",
-            bd=0,
-            highlightthickness=1,
-            highlightbackground=BORDER,
-            font=self.fonts.u(9),
-        )
-        spin.pack(side="right")
-
-    def _save_settings(
-        self,
-        window: tk.Toplevel,
-        recording_var: tk.BooleanVar,
-        images_var: tk.BooleanVar,
-        files_var: tk.BooleanVar,
-        entries_var: tk.StringVar,
-        image_mb_var: tk.StringVar,
-    ) -> None:
-        if self.service is None:
-            return
-        try:
-            max_entries = int(entries_var.get())
-            max_image_mb = int(image_mb_var.get())
-        except ValueError:
-            messagebox.showerror(
-                "设置无效", "容量必须是整数。", parent=window
-            )
-            return
-        try:
-            self.service.update_settings(
-                recording=recording_var.get(),
-                capture_images=images_var.get(),
-                capture_files=files_var.get(),
-                max_entries=max_entries,
-                max_image_mb=max_image_mb,
-            )
-        except Exception as exc:
-            messagebox.showerror("保存设置失败", str(exc), parent=window)
-            return
-        self._flash("设置已保存")
-        self._close_settings(window)
-        self.refresh()
-
-    def _clear_history(self, window: tk.Toplevel) -> None:
-        if self.service is None:
-            return
-        if not messagebox.askyesno(
-            "清空历史",
-            "确定要清空全部剪贴板历史吗？此操作无法撤销。\n"
-            "（不会删除任何原始文件）",
-            parent=window,
-        ):
-            return
-        try:
-            removed = self.service.clear_history()
-        except Exception as exc:
-            messagebox.showerror("清空失败", str(exc), parent=window)
-            return
-        self._selected_id = None
-        self._flash(f"已清空 {removed} 条记录")
-        self.refresh()
-
-    def _open_data_dir(self) -> None:
-        if self.service is None:
-            return
-        try:
-            open_directory(self.service.data_dir)
-        except ClipboardError as exc:
-            messagebox.showerror(
-                "无法打开目录", str(exc), parent=self.winfo_toplevel()
-            )
-
-    def _close_settings(self, window: tk.Toplevel) -> None:
-        if self._settings_window is window:
-            self._settings_window = None
-        try:
-            window.grab_release()
-        except tk.TclError:
-            pass
-        try:
-            window.destroy()
-        except tk.TclError:
-            pass
-
-    def _settings_destroyed(self, event: tk.Event) -> None:
-        if event.widget is self._settings_window:
-            self._settings_window = None
+        callback = self._on_open_settings
+        if callback is not None:
+            callback()
 
     # --------------------------------------------------------------- keyboard
     def _bind_keys(self) -> None:

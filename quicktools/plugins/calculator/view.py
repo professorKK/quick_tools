@@ -6,6 +6,7 @@ import logging
 import tkinter as tk
 import tkinter.font as tkfont
 from pathlib import Path
+from typing import Callable
 
 from quicktools import paths
 from quicktools.ui_theme import (
@@ -46,10 +47,11 @@ from quicktools.plugins.calculator.settings import (
     save_result_group_size,
     save_scientific_mode,
 )
-from quicktools.window_pin import PinButton
 
 _PAD_X = 12
 _SAVE_DEBOUNCE_MS = 400
+_KEYPAD_PADY = (2, 12)
+_KEYPAD_ROW_PAD = 14
 _STATUS_HINT = "自动计算 · Enter 新建下一层 · 支持 0x / 0b / 0o 前缀"
 _SIMPLE_STATUS_HINT = "自动计算 · Enter 新建下一层"
 # The selected base tag is emphasized with color, weight and size.
@@ -325,11 +327,16 @@ class ScratchRow(tk.Frame):
 
 class CalculatorView(tk.Frame):
     def __init__(
-        self, master: tk.Misc, *, data_dir: Path | None = None
+        self,
+        master: tk.Misc,
+        *,
+        data_dir: Path | None = None,
+        on_open_settings: Callable[[], None] | None = None,
     ) -> None:
         super().__init__(master, bg=BG)
         self.fonts = pick_fonts(self.winfo_toplevel())
         self.data_dir = Path(data_dir) if data_dir is not None else None
+        self._on_open_settings = on_open_settings
         self.scientific_mode = load_scientific_mode(self.data_dir)
         self.max_records = load_max_records(self.data_dir)
         self.result_group_size = load_result_group_size(self.data_dir)
@@ -340,21 +347,49 @@ class CalculatorView(tk.Frame):
         self._save_job: str | None = None
         self._save_dirty = False
         self._destroyed = False
-        self._settings_window: tk.Toplevel | None = None
         self._digit_buttons: dict[str, FlatButton] = {}
         self._base_buttons: dict[int, FlatButton] = {}
         self.operator_buttons: list[FlatButton] = []
         self._keypad_icons: dict[str, tk.PhotoImage] = {}
+        self._keypad_faces: dict[FlatButton, tuple[str, tk.PhotoImage]] = {}
+        self._keypad_compact = False
         self._load_operator_icons()
 
         metrics_font = tkfont.Font(family=self.fonts.mono, size=14)
         self._row_height = max(44, metrics_font.metrics("linespace") + 18)
+        self._paper_row_min = self._row_height + 2
+        # Keep one key row usable at the smallest window height.  The icon
+        # buttons fall back to text before the fixed-size operator PNGs would
+        # be clipped.
+        self._key_row_min = max(30, metrics_font.metrics("linespace") + 6)
+        icon_height = max(
+            (image.height() for image in self._keypad_icons.values()),
+            default=0,
+        )
+        self._keypad_compact_threshold = icon_height + 10
         self._conversion_vars: dict[int, tk.StringVar] = {}
         self._base_tag_labels: dict[int, tk.Label] = {}
         self._conversion_cells: dict[int, tk.Frame] = {}
         self._conversion_entries: dict[int, tk.Entry] = {}
         self._scroll_job: str | None = None
+        self._paper_layout_job: str | None = None
         self.bind("<Destroy>", self._on_destroy, add="+")
+
+        # Grid (instead of pack) lets the paper and the keypad share window
+        # height.  When the window shrinks, both rows shrink down to their
+        # minsize instead of clipping the bottom keypad: the paper can reach
+        # exactly one visible layer and the number keys get shorter.
+        self.grid_columnconfigure(0, weight=1)
+        self.grid_rowconfigure(0, weight=0)
+        self.grid_rowconfigure(1, weight=5, minsize=self._paper_row_min)
+        self.grid_rowconfigure(2, weight=0)
+        self.grid_rowconfigure(3, weight=0)
+        self.grid_rowconfigure(4, weight=0)
+        self.grid_rowconfigure(
+            5,
+            weight=1,
+            minsize=self._keypad_min_height() + _KEYPAD_ROW_PAD,
+        )
 
         self._build_header()
         self._build_paper()
@@ -385,25 +420,18 @@ class CalculatorView(tk.Frame):
     # ------------------------------------------------------------------ UI
     def _build_header(self) -> None:
         header = tk.Frame(self, bg=BG)
-        header.pack(fill="x", padx=_PAD_X, pady=(12, 6))
-        self.scratchpad_button = FlatButton(
+        header.grid(
+            row=0, column=0, sticky="ew", padx=_PAD_X, pady=(8, 6)
+        )
+        self._header = header
+        self.scratchpad_title = tk.Label(
             header,
-            "计算器 · 设置",
-            self.open_settings,
-            fonts=self.fonts,
-            font_size=13,
-            padx=0,
-            pady=0,
+            text="草稿纸",
             bg=BG,
             fg=TEXT,
-            hover_bg=ROW_ACTIVE,
+            font=self.fonts.u(13, "bold"),
         )
-        self.scratchpad_button.configure(font=self.fonts.u(13, "bold"))
-        self.scratchpad_button.pack(side="left")
-        self.pin_button = PinButton(
-            header, self.winfo_toplevel(), self.fonts
-        )
-        self.pin_button.pack(side="right", padx=(8, 0))
+        self.scratchpad_title.pack(side="left")
         self.scientific_button = FlatButton(
             header,
             "科学模式：关",
@@ -413,11 +441,11 @@ class CalculatorView(tk.Frame):
             padx=10,
             pady=5,
         )
-        self.scientific_button.pack(side="right", padx=(10, 0))
+        self.scientific_button.pack(side="right")
 
     def _build_paper(self) -> None:
         border = tk.Frame(self, bg=BORDER)
-        border.pack(fill="both", expand=True, padx=_PAD_X)
+        border.grid(row=1, column=0, sticky="nsew", padx=_PAD_X)
         holder = tk.Frame(border, bg=ROW)
         holder.pack(fill="both", expand=True, padx=1, pady=1)
 
@@ -466,11 +494,13 @@ class CalculatorView(tk.Frame):
             padx=_PAD_X,
             pady=3,
         )
-        self.status_label.pack(fill="x")
+        self.status_label.grid(row=2, column=0, sticky="ew")
 
     def _build_conversion_panel(self) -> None:
         outer = tk.Frame(self, bg=BORDER)
-        outer.pack(fill="x", padx=_PAD_X, pady=(4, 6))
+        outer.grid(
+            row=3, column=0, sticky="ew", padx=_PAD_X, pady=(4, 6)
+        )
         self._conversion_outer = outer
         panel = tk.Frame(outer, bg=PANEL)
         panel.pack(fill="x", padx=1, pady=1)
@@ -528,7 +558,9 @@ class CalculatorView(tk.Frame):
 
     def _build_base_selector(self) -> None:
         row = tk.Frame(self, bg=BG)
-        row.pack(fill="x", padx=_PAD_X, pady=(0, 5))
+        row.grid(
+            row=4, column=0, sticky="ew", padx=_PAD_X, pady=(0, 5)
+        )
         self._base_row = row
         tk.Label(
             row,
@@ -562,11 +594,26 @@ class CalculatorView(tk.Frame):
 
     def _build_keypad(self) -> None:
         keypad = tk.Frame(self, bg=BG)
-        keypad.pack(fill="x", padx=_PAD_X, pady=(2, 12))
+        keypad.grid(
+            row=5,
+            column=0,
+            sticky="nsew",
+            padx=_PAD_X,
+            pady=_KEYPAD_PADY,
+        )
         self._keypad = keypad
+        keypad.grid_columnconfigure(0, weight=1)
+        # Function row, A-F row and the four numeric rows share the keypad
+        # height by weight, so every key shrinks/grows vertically with the
+        # window instead of the bottom row being clipped.
+        keypad.grid_rowconfigure(0, weight=1)
+        keypad.grid_rowconfigure(1, weight=1)
+        keypad.grid_rowconfigure(2, weight=4)
+        keypad.bind("<Configure>", self._on_keypad_configure, add="+")
 
         function_row = tk.Frame(keypad, bg=BG)
-        function_row.pack(fill="x")
+        function_row.grid(row=0, column=0, sticky="nsew")
+        function_row.grid_rowconfigure(0, weight=1)
         for column in range(6):
             function_row.grid_columnconfigure(column, weight=1, uniform="key")
         functions = [
@@ -589,7 +636,8 @@ class CalculatorView(tk.Frame):
             button.grid(row=0, column=col, sticky="nsew", padx=2, pady=2)
 
         hex_row = tk.Frame(keypad, bg=BG)
-        hex_row.pack(fill="x")
+        hex_row.grid(row=1, column=0, sticky="nsew")
+        hex_row.grid_rowconfigure(0, weight=1)
         self._hex_row = hex_row
         for col, letter in enumerate("ABCDEF"):
             hex_row.grid_columnconfigure(col, weight=1, uniform="hexkey")
@@ -606,10 +654,12 @@ class CalculatorView(tk.Frame):
             self._digit_buttons[letter] = button
 
         numeric = tk.Frame(keypad, bg=BG)
-        numeric.pack(fill="x")
+        numeric.grid(row=2, column=0, sticky="nsew")
         self._numeric = numeric
         for column in range(4):
             numeric.grid_columnconfigure(column, weight=1, uniform="numkey")
+        for row in range(4):
+            numeric.grid_rowconfigure(row, weight=1)
 
         # The leftmost column is + - * / (top to bottom); digits occupy the
         # three columns to its right.
@@ -631,7 +681,7 @@ class CalculatorView(tk.Frame):
                         self.evaluate_active,
                         fonts=self.fonts,
                         font_size=13,
-                        pady=6,
+                        pady=2,
                         bg=style["bg"],
                         hover_bg=style["hover"],
                         press_bg=style["press"],
@@ -639,6 +689,8 @@ class CalculatorView(tk.Frame):
                     )
                     button.operator_value = "="
                     self.equal_button = button
+                    if image is not None:
+                        self._keypad_faces[button] = (label, image)
                 elif col_index == 0:
                     style = _GOOGLE_OPERATOR_STYLES[value]
                     image = self._keypad_icons.get(style["icon"])
@@ -649,7 +701,7 @@ class CalculatorView(tk.Frame):
                         lambda text=value: self.insert_text(text),
                         fonts=self.fonts,
                         font_size=13,
-                        pady=6,
+                        pady=2,
                         bg=style["bg"],
                         hover_bg=style["hover"],
                         press_bg=style["press"],
@@ -658,6 +710,8 @@ class CalculatorView(tk.Frame):
                     button.operator_value = value
                     self._digit_buttons[value] = button
                     self.operator_buttons.append(button)
+                    if image is not None:
+                        self._keypad_faces[button] = (label, image)
                 else:
                     button = FlatButton(
                         numeric,
@@ -679,21 +733,119 @@ class CalculatorView(tk.Frame):
 
         self.dot_button = self._digit_buttons["."]
 
+    # ------------------------------------------------------- responsive size
+    def _keypad_row_count(self) -> int:
+        return 6 if self.scientific_mode else 5
+
+    def _keypad_min_height(self) -> int:
+        """Minimum keypad height for one comfortable row per key row."""
+        return self._keypad_row_count() * self._key_row_min
+
+    def minimum_content_height(self) -> int:
+        """Height needed for one paper layer plus compact keypad rows."""
+        height = self._header.winfo_reqheight() + 14  # grid pady (8 + 6)
+        height += self._paper_row_min
+        height += self.status_label.winfo_reqheight()
+        if self.scientific_mode:
+            height += self._conversion_outer.winfo_reqheight() + 10
+            height += self._base_row.winfo_reqheight() + 5
+        height += self._keypad_min_height() + _KEYPAD_ROW_PAD
+        return height
+
+    def minimum_window_height(self) -> int:
+        """Content minimum plus the custom title bar, if this is a plugin."""
+        window = self.winfo_toplevel()
+        frame = getattr(window, "quicktools_frame", None)
+        chrome = 0
+        if frame is not None:
+            try:
+                chrome = frame.bar.winfo_reqheight() + 1
+            except tk.TclError:
+                chrome = 0
+        return chrome + self.minimum_content_height()
+
+    def _update_layout_minsizes(self) -> None:
+        self.grid_rowconfigure(1, minsize=self._paper_row_min)
+        self.grid_rowconfigure(
+            5, minsize=self._keypad_min_height() + _KEYPAD_ROW_PAD
+        )
+
+    def _sync_window_minsize(self) -> None:
+        """Keep the window from clipping content after switching modes."""
+        window = self.winfo_toplevel()
+        if getattr(window, "quicktools_frame", None) is None:
+            return
+        try:
+            # Apply pending geometry first: a mode switch right after a resize
+            # must not restore the window at the old (stale) width.
+            self.update_idletasks()
+            width = window.minsize()[0]
+            height = self.minimum_window_height()
+            window.minsize(width, height)
+            if 1 < window.winfo_height() < height:
+                window.geometry(f"{window.winfo_width()}x{height}")
+        except tk.TclError:
+            pass
+
+    def _on_keypad_configure(self, event: tk.Event) -> None:
+        if not self._keypad_faces or not self.winfo_ismapped():
+            return
+        row_height = event.height / self._keypad_row_count()
+        self._set_keypad_compact(
+            row_height < self._keypad_compact_threshold
+        )
+
+    def _set_keypad_compact(self, compact: bool) -> None:
+        """Swap fixed-size operator icons for text when keys get short."""
+        compact = bool(compact)
+        if compact == self._keypad_compact:
+            return
+        self._keypad_compact = compact
+        for button, (label, image) in self._keypad_faces.items():
+            if compact:
+                button.set_face(image=None, text=label)
+            else:
+                button.set_face(image=image, text="")
+
     # --------------------------------------------------------------- layout
     def _on_rows_configure(self, _event=None) -> None:
-        self._sync_paper_layout()
+        self._schedule_paper_layout()
 
     def _on_canvas_configure(self, event: tk.Event) -> None:
+        # Update the embedded frame width immediately so the paper content
+        # follows the window edge; the (more expensive) scrollregion and
+        # bottom-alignment pass is coalesced for the next idle cycle.
         self.canvas.itemconfigure(self._canvas_window, width=event.width)
+        self._schedule_paper_layout()
+
+    def _schedule_paper_layout(self) -> None:
+        if self._paper_layout_job is not None or self._destroyed:
+            return
+        try:
+            self._paper_layout_job = self.after_idle(
+                self._run_paper_layout
+            )
+        except tk.TclError:
+            self._paper_layout_job = None
+
+    def _run_paper_layout(self) -> None:
+        self._paper_layout_job = None
         self._sync_paper_layout()
 
-    def _sync_paper_layout(self) -> None:
-        """Bottom-align short history while keeping long history scrollable."""
+    def _sync_paper_layout(self, *, measure: bool = False) -> None:
+        """Bottom-align short history while keeping long history scrollable.
+
+        ``measure`` is only needed after rows are added/removed: during a
+        window resize the row heights are fixed, so forcing Tk to run idle
+        layout on every Configure would make the edges visibly lag behind
+        the pointer.
+        """
         if self._syncing_paper:
             return
         self._syncing_paper = True
         try:
-            self.rows_frame.update_idletasks()
+            if measure:
+                self.rows_frame.update_idletasks()
             content_height = self.rows_frame.winfo_reqheight()
             viewport = max(1, self.canvas.winfo_height())
             offset = max(0, viewport - content_height)
@@ -727,7 +879,7 @@ class CalculatorView(tk.Frame):
         return "break"
 
     def scroll_to_bottom(self) -> None:
-        self._sync_paper_layout()
+        self._sync_paper_layout(measure=True)
         self.update_idletasks()
         self.canvas.yview_moveto(1.0)
 
@@ -782,6 +934,12 @@ class CalculatorView(tk.Frame):
             except tk.TclError:
                 pass
             self._scroll_job = None
+        if self._paper_layout_job is not None:
+            try:
+                self.after_cancel(self._paper_layout_job)
+            except tk.TclError:
+                pass
+            self._paper_layout_job = None
         self._cancel_scratchpad_save()
         # Tk destroys children before the parent, so this must only use the
         # plain-data snapshot captured while the widgets were alive.
@@ -926,24 +1084,22 @@ class CalculatorView(tk.Frame):
         self.scientific_button.set_active(enabled)
         if enabled:
             if not self._conversion_outer.winfo_manager():
-                self._conversion_outer.pack(
-                    fill="x", padx=_PAD_X, pady=(4, 6), before=self._keypad
-                )
+                self._conversion_outer.grid()
             if not self._base_row.winfo_manager():
-                self._base_row.pack(
-                    fill="x", padx=_PAD_X, pady=(0, 5), before=self._keypad
-                )
+                self._base_row.grid()
             if not self._hex_row.winfo_manager():
-                self._hex_row.pack(fill="x", before=self._numeric)
+                self._hex_row.grid()
         else:
-            self._conversion_outer.pack_forget()
-            self._base_row.pack_forget()
-            self._hex_row.pack_forget()
+            self._conversion_outer.grid_remove()
+            self._base_row.grid_remove()
+            self._hex_row.grid_remove()
+        self._update_layout_minsizes()
         self._update_digit_states()
         self._refresh_conversion()
         self.set_status(self._default_hint(), error=False)
         if persist:
             save_scientific_mode(self.data_dir, enabled)
+            self._sync_window_minsize()
 
     def _default_hint(self) -> str:
         return _STATUS_HINT if self.scientific_mode else _SIMPLE_STATUS_HINT
@@ -1160,7 +1316,7 @@ class CalculatorView(tk.Frame):
             "已删除 1 条记录" if had_text else "已删除空行", error=False
         )
 
-    def clear_scratchpad(self) -> int:
+    def clear_scratchpad(self, *, focus: bool = True) -> int:
         count = self.scratchpad_record_count()
         for row in list(self.rows):
             try:
@@ -1169,16 +1325,18 @@ class CalculatorView(tk.Frame):
                 pass
         self.rows.clear()
         self.active_row = None
-        self.add_row(focus=True)
+        self.add_row(focus=focus)
         self._refresh_conversion()
         self._request_scratchpad_save(immediate=True)
         self.set_status("已清空草稿纸记忆", error=False)
         return count
 
-    def apply_max_records(self, value: int) -> int:
+    def apply_max_records(
+        self, value: int, *, focus: bool = True
+    ) -> int:
         normalized = save_max_records(self.data_dir, value)
         self.max_records = normalized
-        removed = self._trim_rows_to_limit()
+        removed = self._trim_rows_to_limit(focus=focus)
         self._request_scratchpad_save(immediate=True)
         if removed:
             self.set_status(
@@ -1211,7 +1369,7 @@ class CalculatorView(tk.Frame):
             self.set_status("结果已关闭分隔符", error=False)
         return normalized
 
-    def _trim_rows_to_limit(self) -> int:
+    def _trim_rows_to_limit(self, *, focus: bool = True) -> int:
         records = [
             row for row in self.rows if row.memory_expression.strip()
         ]
@@ -1240,7 +1398,8 @@ class CalculatorView(tk.Frame):
                 target = self.rows[target_index]
                 self.active_row = None
                 self.activate_row(target)
-                target.focus()
+                if focus:
+                    target.focus()
         self._refresh_conversion()
         return excess
 
@@ -1248,47 +1407,14 @@ class CalculatorView(tk.Frame):
         for index, row in enumerate(self.rows):
             row.grid(row=index, column=0, sticky="ew")
             row.row_index = index + 1
-        try:
-            self.after_idle(self._sync_paper_layout)
-        except tk.TclError:
-            pass
+        self._schedule_paper_layout()
 
     # ------------------------------------------------------------ settings UI
     def open_settings(self) -> None:
-        window = self._settings_window
-        if window is not None and self._window_exists(window):
-            try:
-                window.deiconify()
-                window.lift()
-                window.focus_force()
-            except tk.TclError:
-                pass
+        """Open the shared plugin settings dialog through the plugin hook."""
+        callback = self._on_open_settings
+        if callback is None:
             return
         self._cancel_scratchpad_save()
         self._flush_scratchpad()
-        from quicktools.plugins.calculator.settings_view import (
-            ScratchpadSettingsDialog,
-        )
-
-        window = ScratchpadSettingsDialog(self.winfo_toplevel(), self)
-        self._settings_window = window
-        window.bind(
-            "<Destroy>",
-            lambda event, w=window: self._on_settings_destroyed(event, w),
-            add="+",
-        )
-
-    def _on_settings_destroyed(
-        self, event: tk.Event, window: tk.Toplevel
-    ) -> None:
-        if event.widget is not window:
-            return
-        if self._settings_window is window:
-            self._settings_window = None
-
-    @staticmethod
-    def _window_exists(window: tk.Misc) -> bool:
-        try:
-            return bool(window.winfo_exists())
-        except tk.TclError:
-            return False
+        callback()

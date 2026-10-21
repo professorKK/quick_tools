@@ -10,6 +10,8 @@
 
 截图插件控制窗口和编辑器使用的线性图标不是图片资源，由 `quicktools/plugins/screenshot/ui/icons.py` 在运行时用 Pillow 绘制并缓存，不需要在此目录生成文件。
 
+插件标题栏的设置（齿轮）和置顶（图钉）图标也不是图片资源：Windows 优先用 `Segoe Fluent Icons` / `Segoe MDL2 Assets` 字体绘制，其他平台由 `quicktools/ui_icons.py` 用 Canvas 线稿回退，因此不需要重新生成资源。
+
 这些派生图片由 `scripts/prepare_assets.py` 从 `logo.png` 生成。更换标志时替换 `logo.png`，重新运行：
 
 ```bash

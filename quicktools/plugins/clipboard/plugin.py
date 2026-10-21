@@ -15,6 +15,8 @@ log = logging.getLogger(__name__)
 
 
 class ClipboardPlugin(PluginBase):
+    settings_cards = True
+
     def __init__(self, context) -> None:
         super().__init__(context)
         self.service: ClipboardService | None = None
@@ -63,7 +65,12 @@ class ClipboardPlugin(PluginBase):
             self.start_service()
         window.title("剪贴板 · 快捷工具")
         window.configure(bg=BG)
-        view = ClipboardView(window, self.service, self._startup_error)
+        view = ClipboardView(
+            window,
+            self.service,
+            self._startup_error,
+            on_open_settings=lambda: self.open_settings(window),
+        )
         view.pack(fill="both", expand=True)
         self._view = view
 
@@ -74,3 +81,23 @@ class ClipboardPlugin(PluginBase):
         window.minsize(min(980, width), min(640, height))
         window.resizable(True, True)
         window.after(60, view.focus_search)
+
+    def create_settings_ui(self, parent: tk.Misc) -> None:
+        from quicktools.settings_widgets import Card
+        from quicktools.ui_theme import CARD_BG, TEXT
+
+        from .settings_view import ClipboardSettingsPanel
+
+        view = self._view
+        if view is None:
+            card = Card(parent)
+            card.pack(fill="x")
+            tk.Label(
+                card.body,
+                text="请先打开剪贴板窗口，再修改设置。",
+                bg=CARD_BG,
+                fg=TEXT,
+                font=("TkDefaultFont", 10),
+            ).pack(anchor="w")
+            return
+        ClipboardSettingsPanel(parent, view).pack(fill="both", expand=True)

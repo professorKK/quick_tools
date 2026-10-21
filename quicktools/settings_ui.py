@@ -23,6 +23,7 @@ from .ui_theme import (
     open_in_file_manager,
     pick_fonts,
 )
+from .window_frame import WindowFrame
 
 if TYPE_CHECKING:
     from .app import QuickToolsApp
@@ -98,10 +99,22 @@ class HotkeyRecorder(tk.Toplevel):
         self.protocol("WM_DELETE_WINDOW", self._cancel)
         self.bind("<KeyPress>", self._on_key_press)
         self.bind("<KeyRelease>", self._on_key_release)
+        self.frame = WindowFrame(
+            self,
+            title="录制快捷键",
+            icon="K",
+            fonts=fonts,
+            dialog=True,
+            pin=False,
+            minimize=False,
+            maximize=False,
+            resizable=False,
+            on_close=self._cancel,
+        )
 
         app.begin_hotkey_capture()
         self._build()
-        center_on_screen(self, 440, 250, parent=master)
+        center_on_screen(self, 460, 300, parent=master)
         self.after(30, self._grab)
 
     def _grab(self) -> None:
@@ -256,8 +269,20 @@ class SettingsWindow(tk.Toplevel):
         self.protocol("WM_DELETE_WINDOW", self.close)
         self.bind("<Escape>", lambda _event: self.close())
         self.minsize(620, 600)
+        self.frame = WindowFrame(
+            self,
+            title="快捷工具 · 设置",
+            icon="Q",
+            fonts=self.fonts,
+            dialog=False,
+            pin=False,
+            minimize=True,
+            maximize=False,
+            resizable=True,
+            on_close=self.close,
+        )
         self._build()
-        center_on_screen(self, 700, 740)
+        center_on_screen(self, 700, 780)
         self.after(50, self.focus_force)
         self._refresh_plugin_section()
 
@@ -284,7 +309,7 @@ class SettingsWindow(tk.Toplevel):
         ).pack(side="left", padx=(0, 12))
         tk.Label(
             header,
-            text="设置",
+            text="应用设置",
             bg=BG,
             fg=TEXT,
             font=self.fonts.u(18, "bold"),

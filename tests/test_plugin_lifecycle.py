@@ -113,6 +113,10 @@ def test_background_plugin_starts_once_and_stops(
         launcher.open_plugin(meta)
         root.update()
         assert "bg" in launcher._plugin_windows
+        plugin_window = launcher._plugin_windows["bg"]
+        assert int(plugin_window.overrideredirect()) == 1
+        assert getattr(plugin_window, "quicktools_frame", None) is not None
+        assert plugin_window.quicktools_frame.settings_button is not None
         launcher.open_plugin(meta)
         root.update()
         assert calls.read_text(encoding="utf-8").splitlines() == ["start"]
