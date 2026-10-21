@@ -34,6 +34,11 @@ def settings_file() -> Path:
     return config_dir() / "settings.json"
 
 
+def window_state_file() -> Path:
+    """Per-plugin window sizes, kept out of settings.json."""
+    return config_dir() / "window_state.json"
+
+
 def user_plugins_dir() -> Path:
     return data_dir() / "plugins"
 

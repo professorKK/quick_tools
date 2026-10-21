@@ -123,6 +123,7 @@ class HelloPlugin(PluginBase):
 
 - `window.title(...)` 仍建议设置，它用于任务栏和窗口枚举；可见标题栏的文字来自 `plugin.json` 的 `name`。
 - `window.geometry(...)`、`center_on_screen(window, ...)`、`window.minsize(...)` 仍然有效。框架会读取 `wm_minsize` 作为拖拽缩放的最小尺寸。
+- 宿主会自动记住每个插件窗口的大小和放大状态（按 `plugin.json` 的 `id`，保存在 `window_state.json`），关闭再打开或重启应用后恢复。`create_ui()` 里的 `geometry()`/`center_on_screen()` 只是首次打开时的默认值；恢复时位置会重新居中，尺寸超过当前屏幕或小于 `wm_minsize` 时自动调整。插件不需要自己保存窗口尺寸。
 - 不要用 `window.resizable(...)` 控制插件窗口：是否允许缩放由 `WindowFrame(resizable=...)` 决定，当前所有平台使用框架的 Tk 自绘边缘缩放。
 - **不要直接在 `Toplevel` 上使用 `grid` 放内容**：标题栏已经用 `pack` 放在窗口顶部，同一个容器混用 `pack` 和 `grid` 会让 Tk 报错。把内容放进一个 `tk.Frame(window)`，再 `pack` 这个 Frame（本指南所有示例都是这样）。
 - 内容背景建议使用 `quicktools.ui_theme` 里的 `BG` / `PANEL` / `BORDER` / `TEXT` / `MUTED`，这样和标题栏、设置对话框保持一致。

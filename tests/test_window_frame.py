@@ -85,10 +85,14 @@ def test_maximize_and_restore_round_trip(root: tk.Tk) -> None:
     window, frame = make_frame(root)
     try:
         original = window.geometry()
+        assert frame.normal_size() == (520, 360)
         frame.maximize()
         root.update()
         assert frame.maximized is True
         assert frame.maximize_button._kind == "restore"
+        # While maximized the window geometry is the work area; the saved
+        # normal size must remain the pre-maximize size.
+        assert frame.normal_size() == (520, 360)
         frame.restore()
         root.update()
         assert frame.maximized is False

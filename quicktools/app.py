@@ -298,6 +298,10 @@ class QuickToolsApp:
     def _cleanup(self) -> None:
         self._shutting_down = True
         try:
+            self.launcher.flush_window_states()
+        except Exception:
+            log.exception("保存插件窗口大小失败")
+        try:
             self.launcher.stop_background_plugins()
         except Exception:
             log.exception("停止后台插件失败")

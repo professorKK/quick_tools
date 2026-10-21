@@ -34,6 +34,7 @@ a frame before building content:
 
 from __future__ import annotations
 
+import re
 import tkinter as tk
 import tkinter.font as tkfont
 from typing import Callable
@@ -72,6 +73,8 @@ RESIZE_INTERVAL_MS = 15
 
 # Button order inside the title bar, from left to right.
 CAPTION_BUTTONS = ("settings", "pin", "minimize", "maximize", "close")
+
+_GEOMETRY_SIZE = re.compile(r"^\s*(\d+)x(\d+)")
 
 _TOOLTIPS = {
     "settings": "设置",
@@ -1009,6 +1012,34 @@ class WindowFrame:
     @property
     def maximized(self) -> bool:
         return self._maximized
+
+    def normal_size(self) -> tuple[int, int] | None:
+        """Return the size the window uses when not maximized.
+
+        Used by the launcher to persist plugin window sizes.  While maximized
+        the current geometry is the monitor work area, so the saved restore
+        geometry is the useful value.
+        """
+        try:
+            geometry = (
+                self._restore_geometry
+                if self._maximized and self._restore_geometry
+                else self.window.wm_geometry()
+            )
+        except tk.TclError:
+            return None
+        match = _GEOMETRY_SIZE.match(geometry or "")
+        if match is not None:
+            width, height = int(match.group(1)), int(match.group(2))
+        else:
+            try:
+                width = self.window.winfo_width()
+                height = self.window.winfo_height()
+            except tk.TclError:
+                return None
+        if width <= 1 or height <= 1:
+            return None
+        return width, height
 
     def close(self) -> None:
         if self._on_close is not None:

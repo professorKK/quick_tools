@@ -11,6 +11,7 @@ import pytest
 from quicktools import launcher as launcher_module
 from quicktools.launcher import Launcher
 from quicktools.plugin_loader import PluginLoader
+from quicktools.window_state import WindowStateStore
 
 pytestmark = pytest.mark.skipif(
     sys.platform != "win32" and not os.environ.get("DISPLAY"),
@@ -96,7 +97,11 @@ def test_background_plugin_starts_once_and_stops(
     loader = PluginLoader(user_plugins=user, builtin_plugins=builtin)
     root = tk.Tk()
     root.withdraw()
-    launcher = Launcher(FakeApp(loader), root)
+    launcher = Launcher(
+        FakeApp(loader),
+        root,
+        window_states=WindowStateStore(tmp_path / "window_state.json"),
+    )
     try:
         calls = data_root / "bg" / "calls.txt"
         assert calls.read_text(encoding="utf-8").splitlines() == ["start"]

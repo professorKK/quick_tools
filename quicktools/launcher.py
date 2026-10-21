@@ -41,6 +41,7 @@ from .win32_window import (
     restore as restore_window,
 )
 from .window_frame import WindowFrame, enable_drag, make_frameless
+from .window_state import WindowStateStore
 
 if TYPE_CHECKING:
     from .app import QuickToolsApp
@@ -60,7 +61,13 @@ _FOCUS_RETRY_DELAYS_MS = (0, 20, 60, 120)
 
 
 class Launcher:
-    def __init__(self, app: "QuickToolsApp", root: tk.Tk) -> None:
+    def __init__(
+        self,
+        app: "QuickToolsApp",
+        root: tk.Tk,
+        *,
+        window_states: WindowStateStore | None = None,
+    ) -> None:
         self.app = app
         self.root = root
         self.fonts: Fonts = pick_fonts(root)
@@ -69,6 +76,8 @@ class Launcher:
         self._errors: list[str] = []
         self._plugin_windows: dict[str, tk.Toplevel] = {}
         self._plugin_frames: dict[str, WindowFrame] = {}
+        self._window_states = window_states or WindowStateStore()
+        self._window_state_jobs: dict[str, str] = {}
         self._background_plugins: dict[str, tuple[PluginMeta, PluginBase]] = {}
         self._background_failures: dict[str, tuple[str, str]] = {}
         self._cards: list[tk.Frame] = []
@@ -688,8 +697,11 @@ class Launcher:
         entry = self._background_plugins.pop(plugin_id, None)
         if entry is None:
             return
-        self._plugin_frames.pop(plugin_id, None)
         window = self._plugin_windows.pop(plugin_id, None)
+        if window is not None and self._exists(window):
+            self._remember_window_size(plugin_id, window)
+        self._cancel_window_state_job(plugin_id)
+        self._plugin_frames.pop(plugin_id, None)
         if window is not None and self._exists(window):
             try:
                 window.destroy()
@@ -750,6 +762,8 @@ class Launcher:
             # title dynamically; normal plugins do not touch this.
             window.quicktools_frame = frame
             instance.create_ui(window)
+            self._bind_window_state(meta.id, window)
+            self._restore_window_state(meta.id, window, frame)
             window.protocol(
                 "WM_DELETE_WINDOW", lambda w=window, mid=meta.id: self._close_plugin(mid, w)
             )
@@ -794,6 +808,117 @@ class Launcher:
         window.lift()
         window.focus_force()
 
+    # -------------------------------------------------------- window state
+    def _bind_window_state(
+        self, plugin_id: str, window: tk.Toplevel
+    ) -> None:
+        window.bind(
+            "<Configure>",
+            lambda event, pid=plugin_id, w=window: (
+                self._on_plugin_window_configure(event, pid, w)
+            ),
+            add="+",
+        )
+
+    def _on_plugin_window_configure(
+        self, event: tk.Event, plugin_id: str, window: tk.Toplevel
+    ) -> None:
+        if event.widget is not window:
+            return
+        self._cancel_window_state_job(plugin_id)
+        try:
+            self._window_state_jobs[plugin_id] = self.root.after(
+                500,
+                lambda: self._save_plugin_window_size(plugin_id, window),
+            )
+        except tk.TclError:
+            pass
+
+    def _cancel_window_state_job(self, plugin_id: str) -> None:
+        job = self._window_state_jobs.pop(plugin_id, None)
+        if job is None:
+            return
+        try:
+            self.root.after_cancel(job)
+        except tk.TclError:
+            pass
+
+    def _save_plugin_window_size(
+        self, plugin_id: str, window: tk.Toplevel
+    ) -> None:
+        self._window_state_jobs.pop(plugin_id, None)
+        if self._exists(window):
+            self._remember_window_size(plugin_id, window)
+
+    def _remember_window_size(
+        self,
+        plugin_id: str,
+        window: tk.Toplevel,
+        *,
+        save: bool = True,
+    ) -> None:
+        frame = self._plugin_frames.get(plugin_id)
+        if frame is not None:
+            size = frame.normal_size()
+            maximized = frame.maximized
+        else:
+            try:
+                size = (window.winfo_width(), window.winfo_height())
+            except tk.TclError:
+                return
+            maximized = False
+        if size is None:
+            return
+        width, height = size
+        if width <= 1 or height <= 1:
+            return
+        changed = self._window_states.set(
+            plugin_id, width, height, maximized=maximized
+        )
+        if changed and save:
+            self._window_states.save()
+
+    def _restore_window_state(
+        self,
+        plugin_id: str,
+        window: tk.Toplevel,
+        frame: WindowFrame | None,
+    ) -> None:
+        state = self._window_states.get(plugin_id)
+        if state is None:
+            return
+        try:
+            window.update_idletasks()
+            min_width, min_height = window.minsize()
+            screen_width = window.winfo_screenwidth()
+            screen_height = window.winfo_screenheight()
+            # Never restore a size larger than the current display; a saved
+            # size from a bigger monitor would otherwise open off-screen.
+            max_width = max(min_width, screen_width - 80)
+            max_height = max(min_height, screen_height - 100)
+            width = max(min_width, min(state.width, max_width))
+            height = max(min_height, min(state.height, max_height))
+            center_on_screen(window, width, height)
+            if state.maximized and frame is not None:
+                frame.maximize()
+        except tk.TclError:
+            log.debug(
+                "恢复插件 %s 的窗口大小失败", plugin_id, exc_info=True
+            )
+
+    def flush_window_states(self) -> None:
+        """Store every open plugin window before the application exits."""
+        for job in list(self._window_state_jobs.values()):
+            try:
+                self.root.after_cancel(job)
+            except tk.TclError:
+                pass
+        self._window_state_jobs.clear()
+        for plugin_id, window in list(self._plugin_windows.items()):
+            if self._exists(window):
+                self._remember_window_size(plugin_id, window, save=False)
+        self._window_states.save()
+
     def _open_plugin_settings(self, instance: PluginBase, window: tk.Toplevel) -> None:
         try:
             opener = getattr(instance, "open_settings", None)
@@ -815,7 +940,9 @@ class Launcher:
     ) -> None:
         if event.widget is not window:
             return
+        self._cancel_window_state_job(plugin_id)
         if self._plugin_windows.get(plugin_id) is window:
+            self._remember_window_size(plugin_id, window)
             self._plugin_windows.pop(plugin_id, None)
         self._plugin_frames.pop(plugin_id, None)
         try:
@@ -838,7 +965,9 @@ class Launcher:
 
     def _close_plugin(self, plugin_id: str, window: tk.Toplevel) -> None:
         if self._plugin_windows.get(plugin_id) is window:
+            self._remember_window_size(plugin_id, window)
             self._plugin_windows.pop(plugin_id, None)
+        self._cancel_window_state_job(plugin_id)
         self._plugin_frames.pop(plugin_id, None)
         try:
             window.destroy()
