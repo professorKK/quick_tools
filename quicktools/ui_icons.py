@@ -1,8 +1,10 @@
 """Small vector icons used by window chrome and settings pages.
 
-Windows ships the Segoe Fluent/MDL2 icon fonts, which give crisp pin and gear
-glyphs that tint with the title bar button state.  Other platforms fall back
-to the Canvas primitives below; both paths use the same 30 px logical grid.
+Both Windows and Linux load the bundled Material Icons font (see
+:mod:`quicktools.icon_font`), so pin/settings/about glyphs look the same on
+every platform and tint with the button state.  The Canvas primitives below
+are the fallback when the font cannot be loaded; both paths use the same
+30 px logical grid.
 """
 
 from __future__ import annotations
@@ -12,11 +14,11 @@ import tkinter as tk
 
 from .ui_theme import Fonts
 
-# Private-use code points shared by Segoe MDL2 Assets and Segoe Fluent Icons.
+# Material Icons code points (see MaterialIcons-Regular.codepoints).
 SYMBOL_GLYPHS = {
-    "pin": "\uE840",
-    "settings": "\uE713",
-    "about": "\uE946",
+    "pin": "\uF10D",  # push_pin
+    "settings": "\uE8B8",  # settings
+    "about": "\uE88F",  # info_outline
 }
 
 
@@ -39,7 +41,7 @@ def draw_symbol(
         cy,
         text=glyph,
         fill=fg,
-        font=(fonts.symbol, max(8, int(size * 0.43))),
+        font=(fonts.symbol, max(8, int(size * 0.6))),
     )
     return True
 

@@ -34,7 +34,6 @@ from .ui_theme import (
     center_on_screen,
     pick_fonts,
 )
-from .win32_focus import force_foreground, is_foreground
 from .win32_window import (
     enable_rounded_corners,
     prepare_top_level,
@@ -42,6 +41,28 @@ from .win32_window import (
 )
 from .window_frame import WindowFrame, enable_drag, make_frameless
 from .window_state import WindowStateStore
+
+if sys.platform == "win32":
+    from .win32_focus import force_foreground, is_foreground
+
+    # Windows always exposes a foreground window.
+    _HAS_NATIVE_FOCUS = True
+elif sys.platform.startswith("linux"):
+    from .x11_focus import force_foreground, is_foreground
+    from .x11_focus import supported as _x11_focus_supported
+
+    # False under Wayland: the compositor owns focus, so keep the legacy
+    # event-based behaviour instead of trusting an unverifiable answer.
+    _HAS_NATIVE_FOCUS = _x11_focus_supported()
+else:  # pragma: no cover - 其他平台的空实现
+
+    def force_foreground(_window: tk.Misc) -> bool:
+        return False
+
+    def is_foreground(_window: tk.Misc) -> bool:
+        return True
+
+    _HAS_NATIVE_FOCUS = False
 
 if TYPE_CHECKING:
     from .app import QuickToolsApp
@@ -285,8 +306,17 @@ class Launcher:
         self._show_started_at = time.perf_counter()
         self._auto_hide_requested = auto_hide
         try:
-            self.window.deiconify()
-            center_on_screen(self.window, 860, 560)
+            if sys.platform.startswith("linux"):
+                # X11: position the window while it is still withdrawn. The
+                # first mapped override-redirect Toplevel can ignore a
+                # position request that races with the initial map, leaving
+                # the launcher at 0,0 (partly under the desktop top bar and
+                # hard to grab for dragging).
+                center_on_screen(self.window, 860, 560)
+                self.window.deiconify()
+            else:
+                self.window.deiconify()
+                center_on_screen(self.window, 860, 560)
             self.window.lift()
             self._focus_search()
             self._activate_window()
@@ -366,6 +396,16 @@ class Launcher:
             self.window.focus_force()
         except tk.TclError:
             return activated
+        if sys.platform.startswith("linux"):
+            # Tk's focus_force() only updates Tk's own focus model for an
+            # overrideredirect window; the X server never receives the focus.
+            # Without X input focus the launcher cannot receive keystrokes or
+            # a <FocusOut> when the user clicks elsewhere.
+            try:
+                activated = force_foreground(self.window) or activated
+            except Exception:
+                log.debug("设置 X11 原生焦点失败", exc_info=True)
+            return activated
         if sys.platform == "win32":
             return activated or is_foreground(self.window)
         return True
@@ -385,7 +425,7 @@ class Launcher:
                 return
         except tk.TclError:
             return
-        if sys.platform == "win32" and not is_foreground(self.window):
+        if _HAS_NATIVE_FOCUS and not is_foreground(self.window):
             next_attempt = attempt + 1
             if next_attempt < len(_FOCUS_RETRY_DELAYS_MS):
                 self._activate_window()
@@ -436,10 +476,11 @@ class Launcher:
             pass
 
     def _on_launcher_focus_in(self, _event=None) -> None:
-        # Tk's focus model can move to the search box while Windows still
-        # considers the window inactive. Only a real foreground activation
-        # counts as "the launcher has been focused".
-        if sys.platform == "win32" and not is_foreground(self.window):
+        # Tk's focus model can move to the search box while the OS still
+        # considers another window active (Windows), or before the X11 focus
+        # request lands. Only a real foreground activation counts as
+        # "the launcher has been focused".
+        if _HAS_NATIVE_FOCUS and not is_foreground(self.window):
             return
         self._had_focus = True
         if self._auto_hide_requested and not self._auto_hide:
@@ -465,14 +506,21 @@ class Launcher:
                 return
         except tk.TclError:
             return
-        if self._focus_within_launcher():
+        # On X11 a <FocusOut> can be delivered while the search box trades
+        # focus with its own toplevel; Tk's focus_get() is briefly None even
+        # though the OS focus never left the launcher. Trust the native focus
+        # first when it is available.
+        if _HAS_NATIVE_FOCUS and is_foreground(self.window):
+            return
+        if self._focus_within(self.window):
             return
         log.info("焦点已移出启动器，自动隐藏")
         self.hide()
 
-    def _focus_within_launcher(self) -> bool:
+    def _focus_within(self, window: tk.Misc) -> bool:
+        """True when Tk's focus is on ``window`` or one of its dialogs."""
         try:
-            focused = self.window.focus_get()
+            focused = window.focus_get()
         except tk.TclError:
             return True
         if focused is None:
@@ -481,16 +529,16 @@ class Launcher:
             top = focused.winfo_toplevel()
         except (AttributeError, tk.TclError):
             return True
-        if top is self.window:
+        if top is window:
             return True
-        # Dialogs parented to the launcher (e.g. the tray menu or a Tk
-        # messagebox) are not part of the launcher toplevel itself.
-        prefix = f"{self.window}."
+        # Dialogs parented to the window (tray menu, plugin settings, a Tk
+        # messagebox) are not part of the window's own toplevel path.
+        prefix = f"{window}."
         try:
             if str(top).startswith(prefix):
                 return True
             # Windows returns a Tcl object here, so compare its string form.
-            if str(top.transient() or "") == str(self.window):
+            if str(top.transient() or "") == str(window):
                 return True
         except (AttributeError, tk.TclError):
             pass
@@ -610,6 +658,7 @@ class Launcher:
         collect(self.window)
         collect(self._tray_popup)
         for window in list(self._plugin_windows.values()):
+            self._reset_plugin_focus_state(window)
             collect(window)
         try:
             self.root.update_idletasks()
@@ -774,6 +823,7 @@ class Launcher:
                 ),
                 add="+",
             )
+            self._bind_plugin_auto_hide(window)
             frame.raise_grips()
         except Exception as exc:
             if window is not None and self._exists(window):
@@ -806,7 +856,144 @@ class Launcher:
         restore_window(window)
         window.deiconify()
         window.lift()
-        window.focus_force()
+        self._mark_plugin_shown(window)
+        self._focus_frameless(window)
+
+    def _focus_frameless(self, window: tk.Misc) -> None:
+        """Focus a frameless window, including real X11 input focus."""
+        try:
+            window.focus_force()
+        except tk.TclError:
+            return
+        if sys.platform.startswith("linux"):
+            try:
+                force_foreground(window)
+            except Exception:
+                log.debug("设置窗口 X11 原生焦点失败", exc_info=True)
+
+    # ------------------------------------------------- plugin auto-hide
+    def _bind_plugin_auto_hide(self, window: tk.Toplevel) -> None:
+        """Hide a main plugin window when the user focuses another window.
+
+        Plugin settings/about dialogs and the screenshot editor/overlay are
+        created outside this path, so they keep their own lifecycle.
+        """
+        window._qt_focus_job = None
+        window._qt_had_focus = False
+        window.bind(
+            "<FocusIn>",
+            lambda _event, w=window: self._on_plugin_focus_in(w),
+            add="+",
+        )
+        window.bind(
+            "<FocusOut>",
+            lambda _event, w=window: self._on_plugin_focus_out(w),
+            add="+",
+        )
+
+    def _mark_plugin_shown(self, window: tk.Toplevel) -> None:
+        self._cancel_plugin_focus_job(window)
+        window._qt_had_focus = True
+
+    def _on_plugin_focus_in(self, window: tk.Toplevel) -> None:
+        if not self._exists(window):
+            return
+        try:
+            if not window.winfo_viewable():
+                return
+        except tk.TclError:
+            return
+        if _HAS_NATIVE_FOCUS and not is_foreground(window):
+            return
+        window._qt_had_focus = True
+
+    def _plugin_pinned(self, window: tk.Toplevel) -> bool:
+        frame = getattr(window, "quicktools_frame", None)
+        try:
+            return bool(frame is not None and frame.pinned)
+        except Exception:
+            return False
+
+    def _on_plugin_focus_out(self, window: tk.Toplevel) -> None:
+        if not getattr(window, "_qt_had_focus", False):
+            return
+        # A pinned window is explicitly meant to stay visible; do not hide it
+        # when the user works in another application.
+        if self._plugin_pinned(window):
+            return
+        if not self._exists(window):
+            return
+        try:
+            if not window.winfo_viewable():
+                return
+        except tk.TclError:
+            return
+        self._cancel_plugin_focus_job(window)
+        try:
+            window._qt_focus_job = window.after(
+                _AUTO_HIDE_DELAY_MS,
+                lambda w=window: self._hide_plugin_if_focus_left(w),
+            )
+        except tk.TclError:
+            window._qt_focus_job = None
+
+    def _hide_plugin_if_focus_left(self, window: tk.Toplevel) -> None:
+        window._qt_focus_job = None
+        if not getattr(window, "_qt_had_focus", False):
+            return
+        # The pin was enabled between FocusOut and this check.
+        if self._plugin_pinned(window):
+            return
+        if not self._exists(window):
+            return
+        try:
+            if not window.winfo_viewable():
+                return
+        except tk.TclError:
+            return
+        if _HAS_NATIVE_FOCUS and is_foreground(window):
+            return
+        if self._focus_within(window):
+            return
+        # A just-opened settings/about dialog may not own Tk's focus yet at
+        # this instant. Keep the parent alive while any child Toplevel is
+        # visible; the dialog's close will restore focus to the parent.
+        if self._has_visible_dialog(window):
+            return
+        log.info("插件窗口失去焦点，自动隐藏：%s", window.title())
+        try:
+            window.withdraw()
+        except tk.TclError:
+            pass
+
+    def _has_visible_dialog(self, window: tk.Toplevel) -> bool:
+        try:
+            children = window.winfo_children()
+        except tk.TclError:
+            return True
+        for child in children:
+            if not isinstance(child, tk.Toplevel):
+                continue
+            try:
+                if child.winfo_viewable():
+                    return True
+            except tk.TclError:
+                continue
+        return False
+
+    def _cancel_plugin_focus_job(self, window: tk.Toplevel) -> None:
+        job = getattr(window, "_qt_focus_job", None)
+        window._qt_focus_job = None
+        if job is None:
+            return
+        try:
+            window.after_cancel(job)
+        except tk.TclError:
+            pass
+
+    def _reset_plugin_focus_state(self, window: tk.Toplevel) -> None:
+        self._cancel_plugin_focus_job(window)
+        window._qt_had_focus = False
 
     # -------------------------------------------------------- window state
     def _bind_window_state(
@@ -940,6 +1127,7 @@ class Launcher:
     ) -> None:
         if event.widget is not window:
             return
+        self._cancel_plugin_focus_job(window)
         self._cancel_window_state_job(plugin_id)
         if self._plugin_windows.get(plugin_id) is window:
             self._remember_window_size(plugin_id, window)
@@ -959,11 +1147,13 @@ class Launcher:
             restore_window(window)
             window.deiconify()
             window.lift()
-            window.focus_force()
+            self._mark_plugin_shown(window)
+            self._focus_frameless(window)
         except tk.TclError:
             pass
 
     def _close_plugin(self, plugin_id: str, window: tk.Toplevel) -> None:
+        self._cancel_plugin_focus_job(window)
         if self._plugin_windows.get(plugin_id) is window:
             self._remember_window_size(plugin_id, window)
             self._plugin_windows.pop(plugin_id, None)
@@ -1334,12 +1524,12 @@ class Launcher:
         popup.deiconify()
         popup.lift()
         popup.attributes("-topmost", True)
-        popup.focus_force()
+        self._focus_frameless(popup)
         try:
             popup.grab_set()
         except tk.TclError:
             pass
-        popup.after(80, popup.focus_force)
+        popup.after(80, lambda: self._focus_frameless(popup))
 
     def hide_tray_menu(self) -> None:
         popup = self._tray_popup

@@ -26,7 +26,7 @@ where = ["."]
 include = ["quicktools*"]
 
 [tool.setuptools.package-data]
-quicktools = ["plugins/*/plugin.json", "assets/*", "assets/keypad/*", "helpers/*"]
+quicktools = ["plugins/*/plugin.json", "assets/*", "assets/keypad/*", "assets/fonts/*", "helpers/*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

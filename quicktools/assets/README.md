@@ -10,7 +10,13 @@
 
 截图插件控制窗口和编辑器使用的线性图标不是图片资源，由 `quicktools/plugins/screenshot/ui/icons.py` 在运行时用 Pillow 绘制并缓存，不需要在此目录生成文件。
 
-插件标题栏的设置（齿轮）和置顶（图钉）图标也不是图片资源：Windows 优先用 `Segoe Fluent Icons` / `Segoe MDL2 Assets` 字体绘制，其他平台由 `quicktools/ui_icons.py` 用 Canvas 线稿回退，因此不需要重新生成资源。
+插件标题栏的设置（齿轮）、置顶（图钉）和关于页的信息图标使用随包内置的 `fonts/MaterialIcons-Regular.ttf`，Windows 与 Linux 共用同一套字形；`quicktools/icon_font.py` 在运行时把字体注册到当前进程：
+
+- Windows 使用 `AddFontResourceExW(FR_PRIVATE)`；
+- Linux 使用 fontconfig 的 `FcConfigAppFontAddFile`；
+- 字体缺失或加载失败时，`quicktools/ui_icons.py` 回退到 Canvas 线稿。
+
+字体来自 Google Material Icons，使用 Apache 2.0 许可，许可证全文见 `fonts/MaterialIcons-LICENSE.txt`。源文件地址：<https://github.com/google/material-design-icons/blob/master/font/MaterialIcons-Regular.ttf>。字体不需要由 `scripts/prepare_assets.py` 生成。
 
 这些派生图片由 `scripts/prepare_assets.py` 从 `logo.png` 生成。更换标志时替换 `logo.png`，重新运行：
 

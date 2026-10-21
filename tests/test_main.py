@@ -13,8 +13,14 @@ from quicktools import __main__ as cli
 class FakeApp:
     instances: ClassVar[list[FakeApp]] = []
 
-    def __init__(self, start_visible: bool = True) -> None:
+    def __init__(
+        self,
+        start_visible: bool = True,
+        *,
+        start_auto_hide: bool = False,
+    ) -> None:
         self.start_visible = start_visible
+        self.start_auto_hide = start_auto_hide
         self.ran = False
         self.commands: queue.Queue[str] = queue.Queue()
         FakeApp.instances.append(self)
@@ -82,6 +88,7 @@ def test_background_starts_hidden_without_instance(patched: FakeIpc) -> None:
     assert patched.commands == ["ping"]
     assert len(FakeApp.instances) == 1
     assert FakeApp.instances[0].start_visible is False
+    assert FakeApp.instances[0].start_auto_hide is False
     assert FakeApp.instances[0].ran
 
 
@@ -101,6 +108,17 @@ def test_normal_launch_starts_visible_without_instance(patched: FakeIpc) -> None
 
     assert patched.commands == ["show"]
     assert FakeApp.instances[0].start_visible is True
+    assert FakeApp.instances[0].start_auto_hide is True
+
+
+def test_show_starts_visible_without_auto_hide(patched: FakeIpc) -> None:
+    patched.result = False
+
+    assert cli.main(["--show"]) == 0
+
+    assert patched.commands == ["show"]
+    assert FakeApp.instances[0].start_visible is True
+    assert FakeApp.instances[0].start_auto_hide is False
 
 
 def test_quit_without_instance_does_not_start_app(patched: FakeIpc) -> None:
@@ -159,6 +177,7 @@ def test_screenshot_starts_hidden_and_enqueues_without_instance(
     assert len(FakeApp.instances) == 1
     app = FakeApp.instances[0]
     assert app.start_visible is False
+    assert app.start_auto_hide is False
     assert app.ran
     assert app.commands.get_nowait() == "plugin screenshot capture_region"
 
@@ -217,6 +236,7 @@ def test_toggle_starts_hidden_and_enqueues_without_instance(
     assert len(FakeApp.instances) == 1
     app = FakeApp.instances[0]
     assert app.start_visible is False
+    assert app.start_auto_hide is False
     assert app.ran
     assert app.commands.get_nowait() == "toggle"
 
@@ -242,6 +262,7 @@ def test_foreground_never_detaches(
 
     assert detached == []
     assert FakeApp.instances[0].start_visible is True
+    assert FakeApp.instances[0].start_auto_hide is True
     assert FakeApp.instances[0].ran
 
 
@@ -260,6 +281,7 @@ def test_source_mode_never_detaches(
 
     assert spawned == []
     assert FakeApp.instances[0].start_visible is True
+    assert FakeApp.instances[0].start_auto_hide is True
 
 
 def test_no_terminal_never_detaches(
@@ -277,6 +299,7 @@ def test_no_terminal_never_detaches(
 
     assert spawned == []
     assert FakeApp.instances[0].start_visible is True
+    assert FakeApp.instances[0].start_auto_hide is True
 
 
 def test_env_guard_prevents_recursion(
@@ -295,6 +318,7 @@ def test_env_guard_prevents_recursion(
 
     assert spawned == []
     assert FakeApp.instances[0].start_visible is True
+    assert FakeApp.instances[0].start_auto_hide is True
 
 
 def test_detach_spawn_failure_returns_one(

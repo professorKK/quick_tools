@@ -140,6 +140,7 @@ def main(argv: list[str] | None = None) -> int:
         return run_tray_helper()
 
     start_visible = True
+    start_auto_hide = False
     startup_command: str | None = None
     if args.background:
         # Login autostart: never surface the launcher. "ping" is answered
@@ -169,9 +170,12 @@ def main(argv: list[str] | None = None) -> int:
             start_visible = False
             startup_command = "toggle"
     else:
-        # A normal second launch should surface the existing launcher.
+        # A normal second launch should surface the existing launcher without
+        # arming auto-hide. A fresh normal launch should behave like a
+        # toggle: clicking outside closes the launcher.
         if send_command("show"):
             return 0
+        start_auto_hide = True
 
     # Pre-flight is done, so this process is about to own the GUI. In the
     # packaged Linux build launched from a terminal, hand it to a detached
@@ -186,7 +190,9 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     try:
-        app = QuickToolsApp(start_visible=start_visible)
+        app = QuickToolsApp(
+            start_visible=start_visible, start_auto_hide=start_auto_hide
+        )
         if startup_command is not None:
             app.commands.put(startup_command)
         app.run()

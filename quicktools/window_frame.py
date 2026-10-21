@@ -35,6 +35,7 @@ a frame before building content:
 from __future__ import annotations
 
 import re
+import sys
 import tkinter as tk
 import tkinter.font as tkfont
 from typing import Callable
@@ -689,6 +690,9 @@ class WindowFrame:
         self._maximize_enabled = maximize
         self._resizable = resizable
         self._maximized = False
+        # Tk's -topmost attribute is ignored for overrideredirect windows on
+        # X11, so track the user's choice instead of reading it back.
+        self._pinned = False
         self._restore_geometry: str | None = None
         self._raise_job: str | None = None
         self._tooltips: list[Tooltip] = []
@@ -910,6 +914,8 @@ class WindowFrame:
 
     @property
     def pinned(self) -> bool:
+        if sys.platform.startswith("linux"):
+            return self._pinned
         try:
             return str(self.window.attributes("-topmost")) in {
                 "1",
@@ -924,13 +930,19 @@ class WindowFrame:
             self.pin_button.set_active(self.pinned)
 
     def toggle_pin(self) -> None:
+        pinned = not self.pinned
+        self._pinned = pinned
         try:
-            pinned = not self.pinned
             self.window.attributes("-topmost", pinned)
             if pinned:
                 self.window.lift()
         except tk.TclError:
             pass
+        log.info(
+            "插件窗口置顶：%s（%s）",
+            "已开启" if pinned else "已取消",
+            self._title,
+        )
         self.refresh_pin()
 
     # ------------------------------------------------------------- actions

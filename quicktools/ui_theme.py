@@ -44,8 +44,9 @@ DIVIDER = "#eef1f5"
 class Fonts:
     ui: str
     mono: str
-    # Windows icon font used for title bar pin/settings glyphs; empty when
-    # the platform has no such font and callers should draw a fallback.
+    # Bundled Material Icons family used for title bar pin/settings glyphs;
+    # empty when the font could not be loaded and callers should draw the
+    # Canvas fallback.
     symbol: str = ""
 
     def u(self, size: int, weight: str = "normal") -> tuple[str, int, str]:
@@ -118,11 +119,22 @@ def enable_high_dpi() -> None:
 
 
 def pick_fonts(root: tk.Misc) -> Fonts:
+    # Register the bundled icon font before enumerating families so Tk sees
+    # it on both Windows and X11. Both platforms then use the same glyphs.
+    bundled_symbol = ""
+    try:
+        from .icon_font import ensure_loaded
+
+        bundled_symbol = ensure_loaded()
+    except Exception:
+        pass
     available = set(tkfont.families(root))
     symbol_candidates: tuple[str, ...] = ()
     if sys.platform == "win32":
         ui_candidates = ("Microsoft YaHei UI", "Microsoft YaHei", "Segoe UI", "Arial")
         mono_candidates = ("Cascadia Mono", "Consolas", "Courier New")
+        # Only used if the bundled font could not be loaded (e.g. a broken
+        # package), so a Windows install still gets real glyphs.
         symbol_candidates = ("Segoe Fluent Icons", "Segoe MDL2 Assets")
     else:
         ui_candidates = (
@@ -144,9 +156,12 @@ def pick_fonts(root: tk.Misc) -> Fonts:
         (name for name in mono_candidates if name in available),
         tkfont.nametofont("TkFixedFont").actual("family"),
     )
-    symbol = next(
-        (name for name in symbol_candidates if name in available), ""
-    )
+    if bundled_symbol and bundled_symbol in available:
+        symbol = bundled_symbol
+    else:
+        symbol = next(
+            (name for name in symbol_candidates if name in available), ""
+        )
     return Fonts(ui=ui, mono=mono, symbol=symbol)
 
 

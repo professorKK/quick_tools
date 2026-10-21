@@ -22,7 +22,9 @@ log = get_logger(__name__)
 
 
 class QuickToolsApp:
-    def __init__(self, start_visible: bool = True) -> None:
+    def __init__(
+        self, start_visible: bool = True, *, start_auto_hide: bool = False
+    ) -> None:
         enable_high_dpi()
         paths.ensure_app_dirs()
         self._shutting_down = False
@@ -56,7 +58,7 @@ class QuickToolsApp:
 
         self._poll_job = self.root.after(50, self._drain_commands)
         if start_visible:
-            self.launcher.show()
+            self.launcher.show(auto_hide=start_auto_hide)
 
     def _load_window_icon(self) -> None:
         try:

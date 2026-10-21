@@ -81,6 +81,25 @@ def test_pin_toggles_topmost_and_state(root: tk.Tk) -> None:
         window.destroy()
 
 
+@pytest.mark.skipif(
+    not sys.platform.startswith("linux"),
+    reason="X11 topmost behaviour",
+)
+def test_pin_state_is_tracked_when_x11_ignores_topmost(root: tk.Tk) -> None:
+    window, frame = make_frame(root)
+    try:
+        assert int(window.attributes("-topmost")) == 0
+        frame.toggle_pin()
+        root.update()
+        # X11 ignores -topmost for overrideredirect windows; the frame must
+        # still remember and display the chosen state.
+        assert frame.pinned is True
+        assert frame.pin_button._active is True
+        assert int(window.attributes("-topmost")) == 0
+    finally:
+        window.destroy()
+
+
 def test_maximize_and_restore_round_trip(root: tk.Tk) -> None:
     window, frame = make_frame(root)
     try:

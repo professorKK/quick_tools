@@ -25,6 +25,8 @@ hiddenimports = [
     'quicktools.ui_icons',
     'quicktools.win32_hotkey',
     'quicktools.win32_focus',
+    'quicktools.x11_focus',
+    'quicktools.icon_font',
     'PIL.Image',
     'PIL.ImageTk',
     'PIL.ImageOps',
