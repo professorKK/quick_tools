@@ -342,8 +342,10 @@ class SettingsWindow(tk.Toplevel):
         tk.Label(
             hotkey_panel,
             text=(
-                "Linux 默认 Ctrl+Alt+Space，避开输入法常用的 Ctrl+Space；"
-                "Windows 默认 Ctrl+Space。X11/Windows 下修改后立即生效。"
+                "Linux 默认 Ctrl+Alt+Space；Windows 默认 Ctrl+Space。"
+                "Windows 使用原生 RegisterHotKey，组合键会被独占；"
+                "若 Ctrl+Space 影响输入法切换，请改绑 Ctrl+Alt+Space。"
+                "X11/Windows 下修改后立即生效。"
             ),
             bg=PANEL,
             fg=MUTED,

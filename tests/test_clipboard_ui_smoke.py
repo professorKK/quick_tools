@@ -118,6 +118,7 @@ def setup(tmp_path: Path):
 
 def test_ui_lists_and_selects_entries(setup) -> None:
     root, _window, view, _service, _backend, text_entry, image_entry, file_entry = setup
+    assert view.pin_button.winfo_exists()
     assert view._count_vars["all"].get() == "3"
     assert len(view._card_rows) == 3
 

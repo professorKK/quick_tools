@@ -25,6 +25,7 @@ from quicktools.ui_theme import (
     center_on_screen,
     pick_fonts,
 )
+from quicktools.window_pin import PinButton
 
 from .models import (
     ClipboardEntry,
@@ -283,6 +284,10 @@ class ClipboardView(tk.Frame):
         panel = tk.Frame(self, bg=BG, padx=16, pady=14)
         header = tk.Frame(panel, bg=BG)
         header.pack(fill="x")
+        self.pin_button = PinButton(
+            header, self.winfo_toplevel(), self.fonts
+        )
+        self.pin_button.pack(side="right")
         self._detail_badge_holder = tk.Frame(header, bg=BG)
         self._detail_badge_holder.pack(side="left", padx=(0, 12))
         titles = tk.Frame(header, bg=BG)

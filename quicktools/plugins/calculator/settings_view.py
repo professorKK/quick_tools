@@ -1,4 +1,4 @@
-"""Scratchpad settings dialog for the calculator plugin."""
+"""Calculator settings dialog (result grouping and scratchpad memory)."""
 
 from __future__ import annotations
 
@@ -8,7 +8,9 @@ from typing import TYPE_CHECKING
 
 from quicktools.plugins.calculator.settings import (
     MAX_MAX_RECORDS,
+    MAX_RESULT_GROUP_SIZE,
     MIN_MAX_RECORDS,
+    MIN_RESULT_GROUP_SIZE,
 )
 from quicktools.ui_theme import (
     BG,
@@ -34,17 +36,18 @@ class ScratchpadSettingsDialog(tk.Toplevel):
         super().__init__(master)
         self.view = view
         self.fonts: Fonts = pick_fonts(self)
-        self.title("草稿纸设置 · 快捷工具")
+        self.title("计算器设置 · 快捷工具")
         self.configure(bg=BG)
         self.transient(master)
         self.protocol("WM_DELETE_WINDOW", self.close)
         self.bind("<Escape>", lambda _event: self.close())
         self.max_var = tk.StringVar(value=str(view.max_records))
+        self.group_var = tk.StringVar(value=str(view.result_group_size))
         self.count_var = tk.StringVar(value="")
         self._build()
         self._refresh_count()
         self.update_idletasks()
-        height = max(330, self.winfo_reqheight())
+        height = max(400, self.winfo_reqheight())
         center_on_screen(self, 480, height, parent=master)
         self.resizable(False, False)
         self.after(30, self._grab)
@@ -55,7 +58,7 @@ class ScratchpadSettingsDialog(tk.Toplevel):
         shell.pack(fill="both", expand=True)
         tk.Label(
             shell,
-            text="草稿纸设置",
+            text="计算器设置",
             bg=BG,
             fg=TEXT,
             font=self.fonts.u(14, "bold"),
@@ -113,6 +116,39 @@ class ScratchpadSettingsDialog(tk.Toplevel):
             wraplength=400,
             font=self.fonts.u(9),
         ).grid(row=2, column=0, columnspan=2, sticky="w", pady=(10, 0))
+
+        tk.Label(
+            body,
+            text="结果分隔位数",
+            bg=PANEL,
+            fg=MUTED,
+            font=self.fonts.u(10),
+        ).grid(row=3, column=0, sticky="w", pady=(12, 0))
+        group_spinbox = ttk.Spinbox(
+            body,
+            from_=MIN_RESULT_GROUP_SIZE,
+            to=MAX_RESULT_GROUP_SIZE,
+            increment=1,
+            width=8,
+            textvariable=self.group_var,
+            font=self.fonts.u(10),
+        )
+        group_spinbox.grid(row=3, column=1, sticky="e", pady=(12, 0))
+        group_spinbox.bind("<Return>", lambda _event: self._save())
+
+        tk.Label(
+            body,
+            text=(
+                "0 表示不分隔；3 表示 1,000。仅十进制结果显示，"
+                "小数只分隔整数部分。"
+            ),
+            bg=PANEL,
+            fg=MUTED,
+            justify="left",
+            anchor="w",
+            wraplength=400,
+            font=self.fonts.u(9),
+        ).grid(row=4, column=0, columnspan=2, sticky="w", pady=(10, 0))
 
         tk.Label(
             shell,
@@ -177,12 +213,30 @@ class ScratchpadSettingsDialog(tk.Toplevel):
                 parent=self,
             )
             return
+        raw_group = self.group_var.get().strip()
+        try:
+            group_size = int(raw_group)
+        except ValueError:
+            group_size = -1
+        if not (
+            MIN_RESULT_GROUP_SIZE
+            <= group_size
+            <= MAX_RESULT_GROUP_SIZE
+        ):
+            messagebox.showerror(
+                "设置错误",
+                f"结果分隔位数必须是 {MIN_RESULT_GROUP_SIZE} 到 "
+                f"{MAX_RESULT_GROUP_SIZE} 之间的整数（0 表示不分隔）。",
+                parent=self,
+            )
+            return
         try:
             self.view.apply_max_records(value)
+            self.view.apply_result_group_size(group_size)
         except Exception as exc:
             messagebox.showerror(
                 "保存失败",
-                f"无法保存草稿纸设置：{exc}",
+                f"无法保存计算器设置：{exc}",
                 parent=self,
             )
             return

@@ -132,6 +132,18 @@ def test_control_window_scroll_search_footer_and_toast(
             assert control.content.grid_rowconfigure(1)["weight"] == 0
             assert _find_label(control, "设置") is not None
             assert _find_label(control.footer, "设置") is None
+            assert control.home_page.pin_button.winfo_exists()
+            assert control.about_page.pin_button.winfo_exists()
+
+            control.home_page.pin_button.toggle()
+            root.update()
+            assert control.home_page.pin_button.pinned is True
+            control.show_page("about")
+            assert control.about_page.pin_button.pinned is True
+            control.about_page.pin_button.toggle()
+            root.update()
+            assert control.about_page.pin_button.pinned is False
+            control.show_page("home")
 
             control.recent_view._search_var.set("窗口")
             control.recent_view._refresh_from_search()

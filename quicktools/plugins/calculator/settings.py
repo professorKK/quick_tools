@@ -12,11 +12,14 @@ from typing import Any
 log = logging.getLogger(__name__)
 
 SETTINGS_FILE = "settings.json"
-SETTINGS_VERSION = 2
+SETTINGS_VERSION = 3
 DEFAULT_SCIENTIFIC_MODE = False
 DEFAULT_MAX_RECORDS = 200
 MIN_MAX_RECORDS = 1
 MAX_MAX_RECORDS = 5000
+DEFAULT_RESULT_GROUP_SIZE = 0
+MIN_RESULT_GROUP_SIZE = 0
+MAX_RESULT_GROUP_SIZE = 10
 
 
 def settings_path(data_dir: Path) -> Path:
@@ -56,6 +59,22 @@ def load_max_records(data_dir: Path | None) -> int:
     return normalize_max_records(load_settings(data_dir).get("max_records"))
 
 
+def normalize_result_group_size(value: Any) -> int:
+    if isinstance(value, bool):
+        return DEFAULT_RESULT_GROUP_SIZE
+    try:
+        number = int(value)
+    except (TypeError, ValueError):
+        return DEFAULT_RESULT_GROUP_SIZE
+    return max(MIN_RESULT_GROUP_SIZE, min(MAX_RESULT_GROUP_SIZE, number))
+
+
+def load_result_group_size(data_dir: Path | None) -> int:
+    return normalize_result_group_size(
+        load_settings(data_dir).get("result_group_size")
+    )
+
+
 def save_scientific_mode(data_dir: Path | None, enabled: bool) -> None:
     if data_dir is None:
         return
@@ -72,6 +91,17 @@ def save_max_records(data_dir: Path | None, value: Any) -> int:
     raw = load_settings(data_dir)
     raw["version"] = SETTINGS_VERSION
     raw["max_records"] = normalized
+    atomic_write_json(settings_path(data_dir), raw)
+    return normalized
+
+
+def save_result_group_size(data_dir: Path | None, value: Any) -> int:
+    normalized = normalize_result_group_size(value)
+    if data_dir is None:
+        return normalized
+    raw = load_settings(data_dir)
+    raw["version"] = SETTINGS_VERSION
+    raw["result_group_size"] = normalized
     atomic_write_json(settings_path(data_dir), raw)
     return normalized
 

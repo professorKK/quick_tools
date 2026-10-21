@@ -161,6 +161,7 @@ def test_editor_copy_and_close(root: tk.Tk) -> None:
     )
     editor.withdraw()
     root.update()
+    assert editor.pin_button.winfo_exists()
     editor.copy()
     assert copied and copied[0].size == (120, 80)
     assert editor._copy_button is not None

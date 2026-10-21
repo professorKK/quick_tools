@@ -26,6 +26,7 @@ from quicktools.ui_theme import (
     center_on_screen,
     pick_fonts,
 )
+from quicktools.window_pin import PinButton
 
 from ..settings import ScreenshotSettings
 from ..ui.icons import IconSet
@@ -200,6 +201,8 @@ class CaptureEditor(tk.Toplevel):
             pady=3,
             font=self.fonts.m(9),
         ).pack(side="left", padx=(10, 0))
+        self.pin_button = PinButton(header, self, self.fonts)
+        self.pin_button.pack(side="right", padx=(8, 0))
         zoom_frame = tk.Frame(header, bg=BG)
         zoom_frame.pack(side="right")
         tk.Label(

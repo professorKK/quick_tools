@@ -62,16 +62,20 @@ def to_pynput_combo(spec: HotkeySpec) -> str:
 
 
 class HotkeyManager:
-    """Owns the pynput listener and keeps Tk calls out of its thread.
+    """Owns the global hotkey listener and keeps Tk calls out of its thread.
 
-    The callback is invoked from pynput's listener thread and must itself be
-    thread-safe (QuickTools uses it only to enqueue a Tk command).
+    On Windows the preferred backend is ``RegisterHotKey`` (WM_HOTKEY), which
+    gives the GUI thread foreground-activation rights and lets the launcher
+    take focus immediately. pynput's low-level hook remains the fallback (and
+    the only backend on Linux/X11); a hook callback does not own the
+    foreground input queue, so it cannot force a window to the foreground.
     """
 
     def __init__(self, spec: HotkeySpec, callback: Callable[[], None]) -> None:
         self._spec = spec
         self._callback = callback
         self._listener = None
+        self._backend = ""
         self.error = ""
         self.available = False
 
@@ -89,6 +93,33 @@ class HotkeyManager:
         except Exception:
             log.exception("全局快捷键回调失败")
 
+    def _start_win32(self, spec: HotkeySpec) -> bool:
+        if sys.platform != "win32":
+            return False
+        try:
+            from .win32_hotkey import Win32Hotkey
+        except Exception:
+            log.debug("Win32 热键后端不可用", exc_info=True)
+            return False
+        backend = Win32Hotkey(self._fire)
+        try:
+            backend.start(spec)
+        except Exception as exc:
+            backend.close()
+            log.warning("Win32 原生热键注册失败，回退 pynput：%s", exc)
+            return False
+        self._listener = backend
+        self._backend = "win32"
+        self.available = True
+        self.error = ""
+        if spec.modifiers == ("ctrl",) and spec.key == "space":
+            log.warning(
+                "Ctrl+Space 与中文输入法冲突；Win32 原生热键会独占该组合，"
+                "建议在设置中改用 Ctrl+Alt+Space"
+            )
+        log.info("全局快捷键已注册：%s（Win32 RegisterHotKey）", spec.display())
+        return True
+
     def _start_listener(self, spec: HotkeySpec) -> None:
         self._stop_listener()
         if is_wayland_session():
@@ -96,6 +127,8 @@ class HotkeyManager:
                 "当前 Wayland 会话不支持应用内全局热键；"
                 "请将系统快捷键绑定到 quicktools --toggle"
             )
+        if self._start_win32(spec):
+            return
         from pynput import keyboard  # imported lazily so --help works headless
 
         combo = to_pynput_combo(spec)
@@ -103,24 +136,34 @@ class HotkeyManager:
         listener.daemon = True
         listener.start()
         self._listener = listener
+        self._backend = "pynput"
         self.available = True
         self.error = ""
         log.info("全局快捷键已注册：%s (%s)", spec.display(), combo)
 
     def _stop_listener(self) -> None:
         listener = self._listener
+        backend = self._backend
         self._listener = None
-        if listener is not None:
+        self._backend = ""
+        if listener is None:
+            return
+        if backend == "win32":
             try:
-                listener.stop()
+                listener.close()
             except Exception:
-                log.debug("停止快捷键监听失败", exc_info=True)
-            join = getattr(listener, "join", None)
-            if callable(join):
-                try:
-                    join(timeout=0.5)
-                except Exception:
-                    pass
+                log.debug("关闭 Win32 热键窗口失败", exc_info=True)
+            return
+        try:
+            listener.stop()
+        except Exception:
+            log.debug("停止快捷键监听失败", exc_info=True)
+        join = getattr(listener, "join", None)
+        if callable(join):
+            try:
+                join(timeout=0.5)
+            except Exception:
+                pass
 
     def start(self, spec: HotkeySpec | None = None) -> bool:
         target = spec or self._spec

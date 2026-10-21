@@ -16,6 +16,12 @@ dist/
 *.tar.gz
 *.zip
 
+# pip 构建隔离中断后可能残留在工作目录的临时目录
+pip-build-env-*/
+pip-build-tracker-*/
+pip-ephem-wheel-cache-*/
+pip-install-*/
+
 # 可执行文件
 *.spec
 !QuickTools.spec

@@ -6,6 +6,9 @@ import sys
 # PyInstaller's static analysis cannot see their imports. Keep this list in
 # sync with quicktools/plugins/clipboard and quicktools/plugins/screenshot.
 hiddenimports = [
+    'quicktools.window_pin',
+    'quicktools.win32_hotkey',
+    'quicktools.win32_focus',
     'PIL.Image',
     'PIL.ImageTk',
     'PIL.ImageOps',

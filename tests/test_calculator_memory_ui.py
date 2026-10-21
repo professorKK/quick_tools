@@ -14,6 +14,7 @@ from quicktools.plugins.calculator.scratchpad_store import (
 )
 from quicktools.plugins.calculator.settings import (
     load_max_records,
+    load_result_group_size,
     load_scientific_mode,
     save_scientific_mode,
 )
@@ -228,7 +229,7 @@ def test_header_button_opens_and_reuses_settings_dialog(
 ) -> None:
     window, view = make_view(root, tmp_path)
     try:
-        assert view.scratchpad_button.cget("text") == "草稿纸 · 设置"
+        assert view.scratchpad_button.cget("text") == "计算器 · 设置"
         view.open_settings()
         dialog = view._settings_window
         assert dialog is not None
@@ -237,6 +238,74 @@ def test_header_button_opens_and_reuses_settings_dialog(
         dialog.close()
         root.update_idletasks()
         assert view._settings_window is None
+    finally:
+        window.destroy()
+
+
+def test_result_grouping_updates_labels_and_persists(
+    root: tk.Tk, tmp_path: Path
+) -> None:
+    window, view = make_view(root, tmp_path)
+    try:
+        assert view.result_group_size == 0
+        add_record(view, "1000")
+        row = view.rows[0]
+        assert row.result_label.cget("text") == "= 1000"
+
+        assert view.apply_result_group_size(3) == 3
+        assert row.result_label.cget("text") == "= 1,000"
+        assert load_result_group_size(tmp_path) == 3
+
+        add_record(view, "1234.5")
+        second = view.rows[1]
+        assert second.result_label.cget("text") == "= 1,234.5"
+
+        view.apply_result_group_size(0)
+        assert row.result_label.cget("text") == "= 1000"
+        assert second.result_label.cget("text") == "= 1234.5"
+    finally:
+        window.destroy()
+
+
+def test_settings_dialog_saves_result_group_size(
+    root: tk.Tk, tmp_path: Path
+) -> None:
+    window, view = make_view(root, tmp_path)
+    try:
+        view.open_settings()
+        dialog = view._settings_window
+        assert dialog is not None
+
+        dialog.group_var.set("3")
+        dialog._save()
+        root.update_idletasks()
+
+        assert view.result_group_size == 3
+        assert load_result_group_size(tmp_path) == 3
+        assert view._settings_window is None
+    finally:
+        window.destroy()
+
+
+def test_settings_dialog_rejects_invalid_group_size(
+    root: tk.Tk, tmp_path: Path, monkeypatch
+) -> None:
+    window, view = make_view(root, tmp_path)
+    try:
+        view.open_settings()
+        dialog = view._settings_window
+        assert dialog is not None
+        errors: list[str] = []
+        monkeypatch.setattr(
+            "quicktools.plugins.calculator.settings_view.messagebox.showerror",
+            lambda title, message, **kwargs: errors.append(message),
+        )
+        dialog.group_var.set("11")
+        dialog._save()
+        assert errors
+        assert view._settings_window is dialog
+        assert view.result_group_size == 0
+        dialog.close()
     finally:
         window.destroy()
 

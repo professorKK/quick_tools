@@ -42,6 +42,16 @@ def test_default_viewport_is_four_rows(view) -> None:
     assert len(calculator.rows) == 1
 
 
+def test_calculator_has_pin_button(view) -> None:
+    calculator, root = view
+    assert calculator.pin_button.winfo_exists()
+    assert calculator.pin_button.pinned is False
+    calculator.pin_button.toggle()
+    root.update()
+    assert calculator.pin_button.pinned is True
+    calculator.pin_button.toggle()
+
+
 def test_current_row_sits_at_bottom_of_empty_paper(view) -> None:
     calculator, root = view
     window = calculator.winfo_toplevel()

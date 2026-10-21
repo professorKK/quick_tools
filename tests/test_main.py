@@ -206,6 +206,21 @@ def test_toggle_detaches_and_forwards_args(
     assert FakeApp.instances == []
 
 
+def test_toggle_starts_hidden_and_enqueues_without_instance(
+    patched: FakeIpc,
+) -> None:
+    patched.result = False
+
+    assert cli.main(["--toggle"]) == 0
+
+    assert patched.commands == ["toggle"]
+    assert len(FakeApp.instances) == 1
+    app = FakeApp.instances[0]
+    assert app.start_visible is False
+    assert app.ran
+    assert app.commands.get_nowait() == "toggle"
+
+
 def test_quit_never_detaches(
     patched: FakeIpc, detached: list[list[str]]
 ) -> None:

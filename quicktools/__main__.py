@@ -140,7 +140,7 @@ def main(argv: list[str] | None = None) -> int:
         return run_tray_helper()
 
     start_visible = True
-    screenshot_command: str | None = None
+    startup_command: str | None = None
     if args.background:
         # Login autostart: never surface the launcher. "ping" is answered
         # directly by the IPC server, so it does not trigger any UI.
@@ -149,8 +149,8 @@ def main(argv: list[str] | None = None) -> int:
         start_visible = False
     elif args.screenshot:
         action = _SCREENSHOT_ACTIONS[args.screenshot]
-        screenshot_command = f"plugin screenshot {action}"
-        if send_command(screenshot_command):
+        startup_command = f"plugin screenshot {action}"
+        if send_command(startup_command):
             return 0
         # No primary instance: start hidden, then run the action once the
         # Tk main loop is draining commands.
@@ -162,7 +162,12 @@ def main(argv: list[str] | None = None) -> int:
         if command == "quit":
             log.info("没有正在运行的快捷工具实例")
             return 0
-        # No primary instance: --toggle/--show start the app.
+        # No primary instance: --toggle/--show start the app. Route --toggle
+        # through the command queue so a cold start behaves exactly like a
+        # hotkey wake-up (including click-outside auto-hide).
+        if command == "toggle":
+            start_visible = False
+            startup_command = "toggle"
     else:
         # A normal second launch should surface the existing launcher.
         if send_command("show"):
@@ -182,8 +187,8 @@ def main(argv: list[str] | None = None) -> int:
 
     try:
         app = QuickToolsApp(start_visible=start_visible)
-        if screenshot_command is not None:
-            app.commands.put(screenshot_command)
+        if startup_command is not None:
+            app.commands.put(startup_command)
         app.run()
         return 0
     except Exception as exc:

@@ -14,6 +14,7 @@ from quicktools.ui_theme import (
     TEXT,
     Fonts,
 )
+from quicktools.window_pin import PinButton
 
 from ..shortcuts import shortcut_label
 from .icons import IconSet
@@ -97,6 +98,11 @@ class HomePage(tk.Frame):
             fg=MUTED,
             font=fonts.u(10),
         ).pack(anchor="w", pady=(4, 0))
+
+        self.pin_button = PinButton(
+            header, self.winfo_toplevel(), fonts
+        )
+        self.pin_button.pack(side="right", padx=(10, 0))
 
         brand = tk.Frame(
             header,

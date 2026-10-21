@@ -41,9 +41,17 @@ if not errorlevel 1 (
 )
 
 echo.
-echo ========== [1/3] 安装依赖 ==========
-python -m pip install --disable-pip-version-check -q -e ".[dev]" pyinstaller
-if errorlevel 1 goto :fail
+echo ========== [1/3] 检查依赖 ==========
+REM 依赖已装好时不要再跑 pip。网络不通时 pip 会卡在下载 setuptools 的
+REM 构建隔离环境里，而且 -q 没有任何输出。只有缺依赖时才安装。
+python -c "import PyInstaller, PIL, pynput, pystray, pytest" >nul 2>&1
+if errorlevel 1 (
+  echo 正在安装缺失的依赖...
+  python -m pip install --disable-pip-version-check --no-build-isolation --timeout 15 -e ".[dev]" pyinstaller
+  if errorlevel 1 goto :fail
+) else (
+  echo 依赖已就绪，跳过安装。
+)
 
 echo.
 echo ========== [2/3] 打包：Windows 目录版 ==========
@@ -73,6 +81,11 @@ if not defined ISCC (
   "%ISCC%" installer.iss
   if errorlevel 1 goto :fail
 )
+
+REM 某些沙箱/安全软件会给工作区文件打上 Low 完整性标签。带这个标签的 exe
+REM 会以低权限启动，单文件版连 %TEMP% 都写不了，报 “Could not create temporary
+REM directory!”。构建结束后把产物显式标回 Medium；失败不影响打包结果。
+icacls "dist\win" /setintegritylevel Medium /T >nul 2>&1
 
 echo.
 echo ==================== 打包完成 ====================

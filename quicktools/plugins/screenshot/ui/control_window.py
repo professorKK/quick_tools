@@ -203,6 +203,10 @@ class ControlWindow(tk.Frame):
         self.current_page = name
         for key, item in self._nav_items.items():
             item.set_active(key == name)
+        for page in self.pages.values():
+            pin = getattr(page, "pin_button", None)
+            if pin is not None:
+                pin.refresh()
         if name == "about":
             self.about_page.refresh()
 

@@ -75,6 +75,18 @@ def test_formatting() -> None:
     assert format_result(0.5, 10) == "0.5"
 
 
+def test_result_grouping() -> None:
+    assert format_result(1000, 10, 3) == "1,000"
+    assert format_result(-1234567, 10, 3) == "-1,234,567"
+    assert format_result(1234567.89, 10, 3) == "1,234,567.89"
+    assert format_result(1000, 10, 4) == "1000"
+    assert format_result(10000, 10, 4) == "1,0000"
+    assert format_result(1000, 10, 0) == "1000"
+    assert format_result(255, 16, 3) == "0xFF"
+    assert format_result(1e20, 10, 3) == "100,000,000,000,000,000,000"
+    assert format_result(1e-7, 10, 3) == "1e-07"
+
+
 @pytest.mark.parametrize(
     "expression",
     [

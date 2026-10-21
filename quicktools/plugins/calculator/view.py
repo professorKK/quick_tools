@@ -40,10 +40,13 @@ from quicktools.plugins.calculator.scratchpad_store import (
 )
 from quicktools.plugins.calculator.settings import (
     load_max_records,
+    load_result_group_size,
     load_scientific_mode,
     save_max_records,
+    save_result_group_size,
     save_scientific_mode,
 )
+from quicktools.window_pin import PinButton
 
 _PAD_X = 12
 _SAVE_DEBOUNCE_MS = 400
@@ -329,6 +332,7 @@ class CalculatorView(tk.Frame):
         self.data_dir = Path(data_dir) if data_dir is not None else None
         self.scientific_mode = load_scientific_mode(self.data_dir)
         self.max_records = load_max_records(self.data_dir)
+        self.result_group_size = load_result_group_size(self.data_dir)
         self.base = 10
         self.rows: list[ScratchRow] = []
         self.active_row: ScratchRow | None = None
@@ -384,7 +388,7 @@ class CalculatorView(tk.Frame):
         header.pack(fill="x", padx=_PAD_X, pady=(12, 6))
         self.scratchpad_button = FlatButton(
             header,
-            "草稿纸 · 设置",
+            "计算器 · 设置",
             self.open_settings,
             fonts=self.fonts,
             font_size=13,
@@ -396,6 +400,10 @@ class CalculatorView(tk.Frame):
         )
         self.scratchpad_button.configure(font=self.fonts.u(13, "bold"))
         self.scratchpad_button.pack(side="left")
+        self.pin_button = PinButton(
+            header, self.winfo_toplevel(), self.fonts
+        )
+        self.pin_button.pack(side="right", padx=(8, 0))
         self.scientific_button = FlatButton(
             header,
             "科学模式：关",
@@ -406,13 +414,6 @@ class CalculatorView(tk.Frame):
             pady=5,
         )
         self.scientific_button.pack(side="right", padx=(10, 0))
-        tk.Label(
-            header,
-            text="点击任意层编辑 · 输入即自动计算",
-            bg=BG,
-            fg=MUTED,
-            font=self.fonts.u(9),
-        ).pack(side="right")
 
     def _build_paper(self) -> None:
         border = tk.Frame(self, bg=BORDER)
@@ -827,7 +828,9 @@ class CalculatorView(tk.Frame):
             self._request_scratchpad_save()
             return
 
-        formatted = format_result(value, self.base)
+        formatted = format_result(
+            value, self.base, self.result_group_size
+        )
         row.set_result(value, self.base, formatted)
         self.set_status(self._default_hint(), error=False)
         self.activate_row(row)
@@ -861,7 +864,11 @@ class CalculatorView(tk.Frame):
         except Exception:
             row.clear_result()
             return
-        row.set_result(value, self.base, format_result(value, self.base))
+        row.set_result(
+            value,
+            self.base,
+            format_result(value, self.base, self.result_group_size),
+        )
 
     # ------------------------------------------------------------- editing
     def insert_text(self, text: str) -> None:
@@ -1071,7 +1078,11 @@ class CalculatorView(tk.Frame):
         except Exception:
             row.clear_result()
             return
-        row.set_result(value, base, format_result(value, base))
+        row.set_result(
+            value,
+            base,
+            format_result(value, base, self.result_group_size),
+        )
 
     def _capture_scratchpad_state(self) -> ScratchpadState:
         entries = [
@@ -1176,6 +1187,29 @@ class CalculatorView(tk.Frame):
         else:
             self.set_status(f"最多保存 {normalized} 条记录", error=False)
         return removed
+
+    def apply_result_group_size(self, value: int) -> int:
+        normalized = save_result_group_size(self.data_dir, value)
+        self.result_group_size = normalized
+        for row in self.rows:
+            if row.result_value is None or row.result_base is None:
+                continue
+            try:
+                formatted = format_result(
+                    row.result_value, row.result_base, normalized
+                )
+                row.result_label.configure(
+                    text=f"= {formatted}", fg=ACCENT
+                )
+            except Exception:
+                continue
+        if normalized:
+            self.set_status(
+                f"结果每 {normalized} 位插入逗号", error=False
+            )
+        else:
+            self.set_status("结果已关闭分隔符", error=False)
+        return normalized
 
     def _trim_rows_to_limit(self) -> int:
         records = [

@@ -39,11 +39,16 @@ if not errorlevel 1 (
   exit /b 1
 )
 
-REM 安装项目本身、测试依赖和 PyInstaller。
-REM   -e ".[dev]"  本项目（可编辑安装，附带测试依赖）
-REM   pyinstaller  打包工具
-python -m pip install -e ".[dev]" pyinstaller
-if errorlevel 1 exit /b 1
+REM 依赖已装好时跳过 pip。网络不通时 pip 会卡在下载 setuptools 的构建
+REM 隔离环境里，而且没有输出；只有缺依赖时才安装。
+python -c "import PyInstaller, PIL, pynput, pystray, pytest" >nul 2>&1
+if errorlevel 1 (
+  echo 正在安装缺失的依赖...
+  python -m pip install --disable-pip-version-check --no-build-isolation --timeout 15 -e ".[dev]" pyinstaller
+  if errorlevel 1 exit /b 1
+) else (
+  echo 依赖已就绪，跳过安装。
+)
 
 REM 按照 QuickTools.spec 的配置打包。
 REM 用 python -m PyInstaller 而不是直接调用 pyinstaller，
@@ -53,6 +58,10 @@ REM --distpath/--workpath：产物放进 dist\win\，中间文件放进 build\wi
 REM 和 Linux 的 dist\linux\、build\linux\ 互不干扰。
 python -m PyInstaller --noconfirm --distpath dist\win --workpath build\win QuickTools.spec
 if errorlevel 1 exit /b 1
+
+REM 某些沙箱/安全软件会给工作区文件打上 Low 完整性标签。带这个标签的 exe
+REM 会以低权限启动，可能连 %TEMP%/%APPDATA% 都写不了。构建结束后标回 Medium。
+icacls "dist\win" /setintegritylevel Medium /T >nul 2>&1
 
 REM 提示最终可执行文件的位置。
 echo.

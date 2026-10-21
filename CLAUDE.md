@@ -53,23 +53,26 @@ build_all.bat                              # Windows：目录版 + 单文件版 
 - `PYTEST_DISABLE_PLUGIN_AUTOLOAD=1` 用于避开系统 ROS 注入的 pytest 插件；干净环境可省略。
 - `DISPLAY` 是 Tk 冒烟测试必需的；没有显示环境时相关测试会自动 skip。
 - 未配置 lint/format 检查步骤，`pyproject.toml` 只配置了 pytest。
-- 打包必须使用项目的 `QuickTools.spec`（目录版）或 `QuickTools-onefile.spec`（单文件版）；Windows 包只能在 Windows 上构建。单文件版会把依赖解压到临时目录，冷启动约 3 秒；目录版约 1 秒。`installer.iss` 用 Inno Setup 6 把 `dist/win/QuickTools` 打成 `dist/win/QuickTools-Setup.exe`，由 `build_all.bat` 自动调用。
+- 打包必须使用项目的 `QuickTools.spec`（目录版）或 `QuickTools-onefile.spec`（单文件版）；Windows 包只能在 Windows 上构建。单文件版会把依赖解压到临时目录，冷启动约 3 秒；目录版约 1 秒。`installer.iss` 用 Inno Setup 6 把 `dist/win/QuickTools` 打成 `dist/win/QuickTools-Setup.exe`，由 `build_all.bat` 自动调用。`build_all.bat`/`build_windows.bat` 会先检查依赖，已安装则跳过 pip；只有缺依赖时才用 `--no-build-isolation` 安装，避免 pip 在构建隔离环境里下载 setuptools 时因网络/代理卡住。构建结束后两个脚本都会执行 `icacls dist\win /setintegritylevel Medium /T`：某些沙箱会给工作区文件打 Low 完整性标签，导致 exe 以低权限启动、单文件版无法写 `%TEMP%` 并报 `Could not create temporary directory!`。
 - **产物目录**：分发产物统一放在 `dist/` 下按平台分目录——`dist/win/`（`QuickTools/` 目录版、`QuickTools.exe` 单文件版、`QuickTools-Setup.exe` 安装包）和 `dist/linux/`（`QuickTools/`）；中间文件在 `build/win/`、`build/win_onefile/`、`build/linux/`。`dist/` 和 `build/` 整体被 `.gitignore` 忽略，不要在 `dist/` 里放中间文件。
 - **换行符**：`.gitattributes` 规定 `*.bat`/`*.iss` 为 CRLF、`*.sh` 为 LF。cmd.exe 不支持 LF 换行的批处理——会把整个文件当成一条命令，注释与下一条命令拼接后报错。新增 Windows 脚本必须保持 CRLF。
 - 仓库提交信息格式为 `YYMMDD: 描述`（如 `261019: 新增加了开机自启动开关`）；`./git-update.sh 描述`（Linux/Git Bash）或 `git-update.bat 描述`（Windows cmd/PowerShell，转调同一个 .sh）会按此格式执行 `git add .` 并提交；两个脚本都会先切到仓库根目录，从子目录调用也不会漏提交。仅在用户明确要求提交时使用。
 
 ## 运行时架构
 
-- `quicktools/__main__.py`：CLI 入口。先做单实例 IPC 预检，再创建 `QuickToolsApp`。Linux 打包版在终端启动时会自动脱离终端（`--foreground` 可禁用）。
-- `quicktools/app.py`：持有隐藏的 Tk 根窗口和生命周期。全局快捷键线程和 IPC 服务只把命令放入 `app.commands` 队列；状态栏子进程通过 IPC 与主实例通信。Tk 主线程每 50ms 调用 `_drain_commands()` 处理队列。**任何后台线程都不得直接操作 Tk 控件**，必须通过队列或 `root.after(...)` 回到主线程。`plugin <id> <action>` 命令会转给 `Launcher.dispatch_plugin_action()`；`hide_for_capture()` 统一隐藏启动器、设置窗口和插件窗口，并返回恢复回调。
-- `quicktools/launcher.py`：启动器窗口、插件卡片、搜索和插件窗口管理。启动器每次显示时都会重新扫描插件；同一插件最多一个窗口；后台插件在整个应用生命周期内只保留一个实例。
+- `quicktools/__main__.py`：CLI 入口。先做单实例 IPC 预检，再创建 `QuickToolsApp`。Linux 打包版在终端启动时会自动脱离终端（`--foreground` 可禁用）。无实例时的 `--toggle` 以 `start_visible=False` 启动，再把 `toggle` 命令放入队列，因此冷启动与快捷键唤出的行为一致；`--screenshot` 同样走队列。
+- `quicktools/app.py`：持有隐藏的 Tk 根窗口和生命周期。全局快捷键回调（Windows 原生 `WM_HOTKEY` 在主线程；pynput 回退时在其监听线程）和 IPC 服务只把命令放入 `app.commands` 队列；状态栏子进程通过 IPC 与主实例通信。Tk 主线程每 50ms 调用 `_drain_commands()` 处理队列。**任何后台线程都不得直接操作 Tk 控件**，必须通过队列或 `root.after(...)` 回到主线程。`plugin <id> <action>` 命令会转给 `Launcher.dispatch_plugin_action()`；`hide_for_capture()` 统一隐藏启动器、设置窗口和插件窗口，并返回恢复回调。
+- `quicktools/launcher.py`：启动器窗口、插件卡片、搜索和插件窗口管理。启动器每次显示时都会重新扫描插件；同一插件最多一个窗口；后台插件在整个应用生命周期内只保留一个实例。`show()` 先 `deiconify`、布局、聚焦，再 `after_idle` 刷新插件；`_activate_window()` 在 Windows 下调用 `win32_focus.force_foreground()`，失败时回退 `focus_force()`。`_verify_foreground()` 按 `_FOCUS_RETRY_DELAYS_MS` 重试并用 `is_foreground()` 确认，**未确认前台前不得武装自动隐藏，也不得因 `FocusOut` 自行隐藏**；`_had_focus` 只在真实前台激活/点击后置位。启动器支持“点击外部自动隐藏”：只有 `toggle()` 唤起的实例调用 `show(auto_hide=True)` 武装，`hide()` 解除并取消待执行检查；`show` 命令、托盘“显示”、普通启动、设置返回和截图后的恢复都保持不武装。判定用 `<FocusOut>` 后延迟 `_AUTO_HIDE_DELAY_MS` 复查 `focus_get()`（子控件、子 Toplevel 和 transient 对话框算作内部），与 `_tray_popup` 的焦点模式一致。`hide_all_windows()` 直接 withdraw 而不走 `hide()`，必须同步 `_set_auto_hide(False)`；`open_plugin()` 弹错误框前也要解除。**只作用于启动器窗口，插件窗口不受影响**。自动隐藏依赖启动器真的获得过焦点，因此不能删除 `_activate_window()`；否则窗口会在无焦点状态下显示，必须先点一下才会在点击外部时隐藏。
+- `quicktools/win32_focus.py`：Windows 专用前台激活。`focus_force()` 只走 `SetForegroundWindow`，后台实例（快捷键或 `--toggle` 唤醒）会被系统的前台激活限制拒绝。这里先临时 `AttachThreadInput` 到当前前台窗口线程，再 `ShowWindow`/`BringWindowToTop`/`SetForegroundWindow`/`SetActiveWindow`/`SetFocus`，并用 `SendMessageTimeoutW(WM_NULL)` 等待异步激活完成；`is_foreground()` 供启动器校验。非 Windows 平台直接返回 False。
+- `quicktools/win32_hotkey.py`：Windows 原生全局热键。用隐藏的 message-only 窗口注册 `RegisterHotKey`，`WM_HOTKEY` 由 Tk 主线程的消息循环分发，回调因此运行在主线程。**这是拿到前台激活权限的关键**：`WM_HOTKEY` 投递给注册线程，该线程可合法调用 `SetForegroundWindow`；pynput 低级钩子没有这个权限。注册失败时 `HotkeyManager` 回退 pynput。`Ctrl+Space` 会被原生注册独占，与中文输入法冲突时建议改绑 `Ctrl+Alt+Space`。
 - `quicktools/ipc.py`：单实例 IPC。Linux 使用 `$XDG_RUNTIME_DIR/quicktools-<uid>.sock`（回退 `/tmp`），Windows 使用 `127.0.0.1:50517`。支持 `toggle`、`show`、`settings`、`quit`、`ping`、`menu x y`，以及严格格式的 `plugin <id> <action>`（动作无负载，消息上限 64 字节）。
 - `quicktools/paths.py`：配置/数据/日志/插件目录。`package_dir()` 同时处理源码与 PyInstaller `_MEIPASS`；内置插件和资源都从这里定位。
 - `quicktools/config.py`：`settings.json` 目前只保存全局快捷键；开机启动状态以操作系统条目为准（`autostart.py`），不写入 settings。
-- `quicktools/hotkey.py`：pynput 全局快捷键。Wayland 下不做应用内监听，只返回明确提示；系统快捷键应绑定到 `quicktools --toggle`。
+- `quicktools/hotkey.py`：全局快捷键管理。Windows 优先使用 `win32_hotkey.Win32Hotkey`（`RegisterHotKey`/`WM_HOTKEY`，主线程回调）；注册失败或非 Windows 使用 pynput。Wayland 下不做应用内监听，只返回明确提示；系统快捷键应绑定到 `quicktools --toggle`。
 - `quicktools/tray.py`：Linux 优先用系统 Python 启动 `helpers/tray_appindicator.py`（Ayatana AppIndicator/SNI），失败回退 pystray XEmbed + Tk 菜单；Windows 使用 pystray 原生托盘。状态栏运行在独立子进程，通过 IPC 控制主实例。
 - `quicktools/settings_ui.py`：设置窗口、快捷键录制、开机启动开关、插件重新扫描。
 - `quicktools/ui_theme.py`：共享配色、`pick_fonts()`、`Fonts.u()/m()`、`FlatButton`。`FlatButton` 基于 `tk.Label`，点击不会抢走输入框焦点，计算器键盘依赖这一点；它只在收到配套 `<ButtonPress>` 后于 `<ButtonRelease>` 执行命令，避免启动器卡片按下后新窗口收到遗留 release 造成幽灵点击（例如打开计算器时自动输入 `+`）。
+- `quicktools/window_pin.py`：插件窗口右上角的 `PinButton`（`FlatButton` 子类）。点击切换 Toplevel 的 `-topmost`，active 状态用主题色并调用 `lift()`；因为基于 Label，不会抢走插件内 Entry 的焦点。计算器、剪贴板、截图助手首页/关于页和截图编辑器都放置了它；截图助手两个页面切换时由 `ControlWindow.show_page()` 调用 `refresh()` 同步状态。临时覆盖层（截图选区、滚动控制条）不使用。该模块只被动态加载的内置插件导入，必须同时列在 `QuickTools.spec` 和 `QuickTools-onefile.spec` 的 `hiddenimports`，否则打包后插件会报 `No module named 'quicktools.window_pin'`。
 
 ## 插件系统
 
@@ -85,10 +88,10 @@ build_all.bat                              # Windows：目录版 + 单文件版 
 ### 计算器（`quicktools/plugins/calculator/`）
 
 - `engine.py`：纯 Python 递归下降解析器，不使用 `eval`；支持 `0x/0b/0o` 前缀、整数/浮点、`//`、`%`、`^`/`**`。`evaluate()` 是严格求值；`evaluate_live()` 用于输入过程，悬空的 `+`/`-` 补 `0`，`*`/`/`/`//`/`%` 补 `1`，但 `^`/`**` 和括号不匹配仍不可计算；`filter_input()` 按进制过滤键入/粘贴字符。
-- `settings.py`：计算器自己的 `settings.json`，保存“科学模式”和最大保存条数 `max_records`（默认 200，范围 1–5000）；默认关闭，文件损坏时回退默认值。`CalculatorView` 通过 `data_dir` 参数读写它，未传时只在内存中使用默认值，便于测试。
+- `settings.py`：计算器自己的 `settings.json`，保存“科学模式”、最大保存条数 `max_records`（默认 200，范围 1–5000）和结果分隔位数 `result_group_size`（默认 0，范围 0–10；0 不分隔，3 表示 `1,000`）；默认关闭，文件损坏时回退默认值。`CalculatorView` 通过 `data_dir` 参数读写它，未传时只在内存中使用默认值，便于测试。
 - `scratchpad_store.py`：草稿纸记忆持久化。`ScratchEntry(expression, base)` 记录每行表达式和输入进制，结果不落盘、恢复时用 `evaluate_live` + `format_result` 重算。`scratchpad.json` 结构为 `{version, last_base, rows:[{expression, base}]}`；只保留最新 `max_records` 条，空行/超长/非法行跳过，损坏文件回退空状态。
-- `settings_view.py`：点击“草稿纸 · 设置”打开的模态弹窗，编辑最大保存条数、显示当前记忆数、清空全部记录（`messagebox.askyesno` 确认）。保存上限会立即调用视图裁剪。
-- `view.py`：草稿纸 UI。首次打开时按持久化的 `scientific_mode` 决定布局；右上角“科学模式”开关调用 `_apply_scientific_mode()`，关闭时隐藏进制转换栏、进制选择行和 A-F 行并强制切回 DEC，开启时按“转换栏 → 进制选择 → 键盘”的 pack 顺序恢复。`ScratchRow._on_write()` 先归一化再按当前进制过滤，随后 `_update_live_result()` 实时显示 `= 结果` 并刷新进制转换栏；`Enter`/`=` 确认当前层，若它是最底层则新建下一层。转换栏顺序为 `BIN DEC / OCT HEX`，底部进制按键顺序为 `BIN OCT HEX DEC`，默认 DEC，选中进制整格高亮。
+- `settings_view.py`：点击“计算器 · 设置”打开的模态弹窗，编辑最大保存条数、结果分隔位数、显示当前记忆数、清空全部记录（`messagebox.askyesno` 确认）。保存上限会立即调用视图裁剪，修改分隔位数会立即刷新已有结果标签。
+- `view.py`：草稿纸 UI。首次打开时按持久化的 `scientific_mode` 决定布局；右上角“科学模式”开关调用 `_apply_scientific_mode()`，关闭时隐藏进制转换栏、进制选择行和 A-F 行并强制切回 DEC，开启时按“转换栏 → 进制选择 → 键盘”的 pack 顺序恢复。`ScratchRow._on_write()` 先归一化再按当前进制过滤，随后 `_update_live_result()` 实时显示 `= 结果` 并刷新进制转换栏；`Enter`/`=` 确认当前层，若它是最底层则新建下一层。所有 `format_result()` 调用都传 `self.result_group_size`；`apply_result_group_size()` 保存设置后刷新已有行的结果标签。转换栏顺序为 `BIN DEC / OCT HEX`，底部进制按键顺序为 `BIN OCT HEX DEC`，默认 DEC，选中进制整格高亮。
 - 草稿纸记忆：`CalculatorView` 初始化时按 `max_records` 恢复行（逐行 `restore_expression()` 绕过当前进制过滤，用行内 base 求值），末尾始终补一行空输入行。输入/求值后 400ms 防抖保存；删除行、清空、修改上限立即保存。`<Destroy>` 必须用 `_scratchpad_state` 普通数据缓存同步 flush，因为 Tk 子控件在父 `<Destroy>` 之前已销毁。每行右侧 × 调 `delete_row()`，删除后重排 grid、激活邻近行并至少保留一行；`apply_max_records()` 调小上限时立即删除最旧的非空行。
 - 修改行为时同步更新 `tests/test_engine.py`、`tests/test_calculator_settings.py`、`tests/test_calculator_scratchpad.py`、`tests/test_calculator_memory_ui.py`、`tests/test_ui_smoke.py`、`tests/test_flat_button.py` 和 README 计算器章节。
 
@@ -126,7 +129,7 @@ build_all.bat                              # Windows：目录版 + 单文件版 
 
 ## 测试与平台约定
 
-- `tests/test_ui_smoke.py`、`tests/test_calculator_memory_ui.py`、`tests/test_flat_button.py`、`tests/test_clipboard_ui_smoke.py`、`tests/test_plugin_lifecycle.py`、`tests/test_screenshot_ui_smoke.py` 需要可用显示；无 `DISPLAY` 时 skip。
+- `tests/test_ui_smoke.py`、`tests/test_calculator_memory_ui.py`、`tests/test_flat_button.py`、`tests/test_clipboard_ui_smoke.py`、`tests/test_plugin_lifecycle.py`、`tests/test_launcher_autohide.py`、`tests/test_win32_focus.py`、`tests/test_window_pin.py`、`tests/test_screenshot_ui_smoke.py` 需要可用显示；无 `DISPLAY` 时 skip。`test_hotkey_win32.py` 只测 Win32 虚拟键映射，非 Windows 全部 skip。`test_window_pin.py` 验证图钉切换 `-topmost` 和状态同步。`test_launcher_autohide.py` 用真实 `tk.Tk`/`Launcher`，并通过 monkeypatch `window.after`/`after_cancel` 记录调度，不等待真实计时器；`test_win32_focus.py` 的 Win32 用例只在 Windows 上运行。整轮测试偶尔会在 Tk 初始化时抛 `couldn't read ... tcl8.6/init.tcl`（Windows 上创建 Tk 的并发问题），重跑即可恢复，与业务代码无关。
 - `tests/test_clipboard_windows.py` 只在 Windows 上运行；Linux 下 skip。截图 Windows 路径目前没有自动化实机测试，需按 README 清单验收。
 - 剪贴板服务测试使用 `FakeBackend`/`FakeRoot`，不依赖真实系统剪贴板；引擎测试只依赖 `engine.py`。
 - 截图测试：几何/标注/渲染/拼接/设置/最近库/portal/图标绘制/快捷键注册为纯逻辑测试；`test_screenshot_service.py` 用 `FakeRoot`/FakeBackend/FakeOverlay/FakeEditor 测状态机；`test_screenshot_ui_smoke.py` 覆盖画笔绘制、空格+左键平移、选择工具空白处平移、自动保存和关闭前 flush；`test_screenshot_service.py` 覆盖自动保存更新最近记录/缩略图、同步覆盖已导出文件以及返回时刷新最近列表；`test_screenshot_control_window.py` 和 `test_screenshot_backends.py` 的 X11 用例、`test_screenshot_icons.py` 的 IconSet 用例需要显示。Wayland portal 只用 fake 客户端验证，真实 portal 必须按 README 在 Wayland 实机验收。

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import sys
+import time
 import tkinter as tk
 from tkinter import messagebox
 from typing import TYPE_CHECKING, Callable
@@ -32,11 +33,23 @@ from .ui_theme import (
     center_on_screen,
     pick_fonts,
 )
+from .win32_focus import force_foreground, is_foreground
 
 if TYPE_CHECKING:
     from .app import QuickToolsApp
 
 log = get_logger(__name__)
+
+# Delay before re-checking focus after the launcher loses it. The window
+# manager can take a few milliseconds to hand focus to the next window, so
+# hiding immediately would misfire on transient focus changes.
+_AUTO_HIDE_DELAY_MS = 150
+
+# A background process may need more than one attempt before Windows hands it
+# the foreground: SetForegroundWindow is asynchronous across input queues and
+# the Tk window may still be finishing its first map. Retry briefly instead of
+# leaving a visible-but-inactive launcher behind.
+_FOCUS_RETRY_DELAYS_MS = (0, 20, 60, 120)
 
 
 class Launcher:
@@ -53,6 +66,16 @@ class Launcher:
         self._cards: list[tk.Frame] = []
         self._search_job: str | None = None
         self._tray_popup: tk.Toplevel | None = None
+        # "Click outside to hide" only applies to launcher instances woken by
+        # the toggle command (hotkey or --toggle).
+        self._auto_hide = False
+        self._auto_hide_job: str | None = None
+        self._plugin_refresh_job: str | None = None
+        self._focus_job: str | None = None
+        self._had_focus = False
+        self._showing = False
+        self._auto_hide_requested = False
+        self._show_started_at = 0.0
         self._header_logo = None
         try:
             self._header_logo = tk.PhotoImage(
@@ -68,9 +91,16 @@ class Launcher:
         self.window.configure(bg=BG)
         self.window.protocol("WM_DELETE_WINDOW", self.hide)
         self.window.bind("<Escape>", lambda _e: self.hide())
+        self.window.bind("<FocusIn>", self._on_launcher_focus_in)
+        self.window.bind("<FocusOut>", self._on_launcher_focus_out)
         self.window.minsize(640, 420)
+        self.window.attributes("-topmost", True)
         self._build()
         self.reload_plugins()
+        # Lay out while still hidden so the first hotkey show only has to map
+        # an already-built window, not run the whole geometry pass on screen.
+        self.window.geometry("800x540")
+        self.window.update_idletasks()
 
     # ---------------------------------------------------------------- build
     def _build(self) -> None:
@@ -208,19 +238,57 @@ class Launcher:
         ).pack(side="right")
 
     # --------------------------------------------------------------- window
-    def show(self) -> None:
-        self.window.deiconify()
+    def show(self, *, auto_hide: bool = False) -> None:
+        self._cancel_focus_job()
+        self._showing = True
+        self._had_focus = False
+        self._show_started_at = time.perf_counter()
+        self._auto_hide_requested = auto_hide
+        try:
+            self.window.deiconify()
+            center_on_screen(self.window, 800, 540)
+            self.window.lift()
+            self._focus_search()
+            self._activate_window()
+            self._set_auto_hide(auto_hide)
+            self.search_var.set("")
+            # Focus and paint the launcher before doing filesystem/plugin
+            # work. On Windows, delaying activation until after
+            # reload_plugins() leaves the window visibly inactive while that
+            # work runs; that is the "grey text for a second" symptom.
+            self._focus_search()
+            self._schedule_plugin_refresh()
+            log.info("启动器已显示")
+        finally:
+            self._showing = False
+        self._verify_foreground(0)
+
+    def _schedule_plugin_refresh(self) -> None:
+        job = self._plugin_refresh_job
+        if job is not None:
+            try:
+                self.window.after_cancel(job)
+            except tk.TclError:
+                pass
+        try:
+            self._plugin_refresh_job = self.window.after_idle(
+                self._refresh_plugins_after_show
+            )
+        except tk.TclError:
+            self._plugin_refresh_job = None
+
+    def _refresh_plugins_after_show(self) -> None:
+        self._plugin_refresh_job = None
+        if not self._exists(self.window):
+            return
         # Pick up plugins copied into the user directory since the last show.
         self.reload_plugins()
-        center_on_screen(self.window, 800, 540)
-        self.window.attributes("-topmost", True)
-        self.window.lift()
-        self.window.focus_force()
-        self.search_var.set("")
-        self.window.after(40, self._focus_search)
-        log.info("启动器已显示")
 
     def hide(self) -> None:
+        self._cancel_focus_job()
+        self._auto_hide_requested = False
+        self._had_focus = False
+        self._set_auto_hide(False)
         self.window.withdraw()
         log.info("启动器已隐藏")
 
@@ -228,7 +296,7 @@ class Launcher:
         if self.window.winfo_viewable():
             self.hide()
         else:
-            self.show()
+            self.show(auto_hide=True)
 
     def _focus_search(self) -> None:
         try:
@@ -236,6 +304,157 @@ class Launcher:
             self.search_entry.selection_range(0, tk.END)
         except tk.TclError:
             pass
+
+    def _activate_window(self) -> bool:
+        """Bring the launcher to the foreground and give it keyboard focus.
+
+        A process woken from the background (hotkey or ``--toggle`` while an
+        instance already runs) is not allowed to call SetForegroundWindow
+        unless it owns the foreground input queue. The Windows backend
+        receives ``WM_HOTKEY`` on this thread, which grants that right; the
+        AttachThreadInput helper is the fallback for pynput/legacy paths.
+        """
+        activated = False
+        if sys.platform == "win32":
+            try:
+                activated = force_foreground(self.window)
+            except Exception:
+                log.debug("强制前台激活失败，回退到 focus_force()", exc_info=True)
+        try:
+            # focus_force() also sets Tk's focus model to the launcher even
+            # when Windows refuses the foreground change.
+            self.window.focus_force()
+        except tk.TclError:
+            return activated
+        if sys.platform == "win32":
+            return activated or is_foreground(self.window)
+        return True
+
+    def _verify_foreground(self, attempt: int = 0) -> None:
+        """Check (and briefly retry) that the OS really activated the window.
+
+        SetForegroundWindow is asynchronous across input queues, so a single
+        call can return before the window is active. Arming auto-hide during
+        that gap makes the launcher hide itself ~150 ms after being shown.
+        """
+        self._focus_job = None
+        if not self._exists(self.window):
+            return
+        try:
+            if not self.window.winfo_viewable():
+                return
+        except tk.TclError:
+            return
+        if sys.platform == "win32" and not is_foreground(self.window):
+            next_attempt = attempt + 1
+            if next_attempt < len(_FOCUS_RETRY_DELAYS_MS):
+                self._activate_window()
+                delay = _FOCUS_RETRY_DELAYS_MS[next_attempt]
+                try:
+                    self._focus_job = self.window.after(
+                        delay, lambda: self._verify_foreground(next_attempt)
+                    )
+                except tk.TclError:
+                    self._focus_job = None
+                return
+            log.warning("启动器未能取得前台焦点，保持显示")
+            # Never self-hide a window the user has not been able to focus.
+            self._set_auto_hide(False)
+            return
+        self._had_focus = True
+        self._focus_search()
+        if self._show_started_at:
+            elapsed = (time.perf_counter() - self._show_started_at) * 1000
+            log.info("启动器已取得前台焦点（%.0fms）", elapsed)
+            self._show_started_at = 0.0
+        if self._auto_hide_requested:
+            self._set_auto_hide(True)
+
+    def _cancel_focus_job(self) -> None:
+        job = self._focus_job
+        self._focus_job = None
+        if job is None:
+            return
+        try:
+            self.window.after_cancel(job)
+        except tk.TclError:
+            pass
+
+    # ------------------------------------------------------- auto-hide
+    def _set_auto_hide(self, enabled: bool) -> None:
+        self._auto_hide = enabled
+        self._cancel_auto_hide_job()
+
+    def _cancel_auto_hide_job(self) -> None:
+        job = self._auto_hide_job
+        self._auto_hide_job = None
+        if job is None:
+            return
+        try:
+            self.window.after_cancel(job)
+        except tk.TclError:
+            pass
+
+    def _on_launcher_focus_in(self, _event=None) -> None:
+        # Tk's focus model can move to the search box while Windows still
+        # considers the window inactive. Only a real foreground activation
+        # counts as "the launcher has been focused".
+        if sys.platform == "win32" and not is_foreground(self.window):
+            return
+        self._had_focus = True
+        if self._auto_hide_requested and not self._auto_hide:
+            self._set_auto_hide(True)
+
+    def _on_launcher_focus_out(self, _event=None) -> None:
+        if not self._auto_hide or not self._had_focus or self._showing:
+            return
+        self._cancel_auto_hide_job()
+        try:
+            self._auto_hide_job = self.window.after(
+                _AUTO_HIDE_DELAY_MS, self._hide_if_clicked_outside
+            )
+        except tk.TclError:
+            pass
+
+    def _hide_if_clicked_outside(self) -> None:
+        self._auto_hide_job = None
+        if not self._auto_hide or not self._had_focus or not self._exists(self.window):
+            return
+        try:
+            if not self.window.winfo_viewable():
+                return
+        except tk.TclError:
+            return
+        if self._focus_within_launcher():
+            return
+        log.info("焦点已移出启动器，自动隐藏")
+        self.hide()
+
+    def _focus_within_launcher(self) -> bool:
+        try:
+            focused = self.window.focus_get()
+        except tk.TclError:
+            return True
+        if focused is None:
+            return False
+        try:
+            top = focused.winfo_toplevel()
+        except (AttributeError, tk.TclError):
+            return True
+        if top is self.window:
+            return True
+        # Dialogs parented to the launcher (e.g. the tray menu or a Tk
+        # messagebox) are not part of the launcher toplevel itself.
+        prefix = f"{self.window}."
+        try:
+            if str(top).startswith(prefix):
+                return True
+            # Windows returns a Tcl object here, so compare its string form.
+            if str(top.transient() or "") == str(self.window):
+                return True
+        except (AttributeError, tk.TclError):
+            pass
+        return False
 
     # -------------------------------------------------------------- plugins
     def reload_plugins(self) -> tuple[int, list[str]]:
@@ -330,6 +549,11 @@ class Launcher:
         Only windows that were visible at call time are restored. The callback
         is idempotent and tolerates windows destroyed while hidden.
         """
+        # This path withdraws windows directly instead of going through
+        # hide(), and the restore only deiconifies. A restored launcher counts
+        # as a non-toggle display, so drop the auto-hide flag instead of
+        # leaving it armed.
+        self._set_auto_hide(False)
         hidden: list[tk.Toplevel] = []
 
         def collect(window: tk.Toplevel | None) -> None:
@@ -490,6 +714,9 @@ class Launcher:
                     pass
             log.exception("打开插件 %s 失败", meta.id)
             message = str(exc) if str(exc) else exc.__class__.__name__
+            # A native dialog reports no Tk focus owner, so an armed
+            # auto-hide check would hide the launcher behind its own error.
+            self._set_auto_hide(False)
             messagebox.showerror(
                 "插件加载失败",
                 f"无法打开插件“{meta.name}”：\n\n{message}\n\n详细日志：{paths.log_file()}",

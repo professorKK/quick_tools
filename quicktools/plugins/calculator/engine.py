@@ -467,17 +467,40 @@ def evaluate_live(expression: str, base: int = 10) -> int | float:
         return evaluate(completed, base)
 
 
-def format_decimal(value: int | float) -> str:
+def group_decimal_text(text: str, size: int) -> str:
+    """Insert commas into the integer part of a decimal numeral.
+
+    ``size`` is the number of digits per group (0 disables grouping).
+    Exponent notation (``1e+20``) is left untouched because grouping its
+    mantissa would be misleading; non-decimal bases should not call this.
+    """
+    if size <= 0 or "e" in text.lower():
+        return text
+    sign = ""
+    if text.startswith(("-", "+")):
+        sign, text = text[0], text[1:]
+    integer, dot, fraction = text.partition(".")
+    if len(integer) <= size:
+        return sign + text
+    groups: list[str] = []
+    while integer:
+        groups.append(integer[-size:])
+        integer = integer[:-size]
+    grouped = ",".join(reversed(groups))
+    return sign + grouped + (dot + fraction if dot else "")
+
+
+def format_decimal(value: int | float, group_size: int = 0) -> str:
     if isinstance(value, int):
-        return str(value)
+        return group_decimal_text(str(value), group_size)
     if not math.isfinite(value):
         raise ExpressionError("结果超出可计算范围")
     if value == 0:
         return "0"
     if value.is_integer():
         # Avoid showing 4.0 after division such as 8/2.
-        return str(int(value))
-    return format(value, ".12g")
+        return group_decimal_text(str(int(value)), group_size)
+    return group_decimal_text(format(value, ".12g"), group_size)
 
 
 def _group_binary(digits: str) -> str:
@@ -488,12 +511,12 @@ def _group_binary(digits: str) -> str:
     return " ".join(reversed(groups))
 
 
-def format_int(value: int, base: int) -> str:
+def format_int(value: int, base: int, group_size: int = 0) -> str:
     validate_base(base)
     sign = "-" if value < 0 else ""
     magnitude = abs(value)
     if base == 10:
-        return sign + str(magnitude)
+        return sign + group_decimal_text(str(magnitude), group_size)
     if base == 16:
         digits = format(magnitude, "X")
     elif base == 8:
@@ -504,13 +527,13 @@ def format_int(value: int, base: int) -> str:
     return sign + BASE_PREFIX[base] + digits
 
 
-def format_result(value: int | float, base: int) -> str:
+def format_result(value: int | float, base: int, group_size: int = 0) -> str:
     """Format a result in the base it was evaluated in."""
     if isinstance(value, int):
-        return format_int(value, base)
+        return format_int(value, base, group_size)
     if base != 10 and value.is_integer() and math.isfinite(value):
-        return format_int(int(value), base)
-    return format_decimal(value)
+        return format_int(int(value), base, group_size)
+    return format_decimal(value, group_size)
 
 
 def convert_bases(value: int | float) -> dict[int, str | None]:

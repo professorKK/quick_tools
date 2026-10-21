@@ -17,6 +17,9 @@ import sys
 from pathlib import Path
 
 hiddenimports = [
+    'quicktools.window_pin',
+    'quicktools.win32_hotkey',
+    'quicktools.win32_focus',
     'PIL.Image',
     'PIL.ImageTk',
     'PIL.ImageOps',
