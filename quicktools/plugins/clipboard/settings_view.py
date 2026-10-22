@@ -305,9 +305,8 @@ class ClipboardSettingsPanel(tk.Frame):
         flash = getattr(self.view, "_flash", None)
         if callable(flash):
             flash("设置已保存")
-        refresh = getattr(self.view, "refresh", None)
-        if callable(refresh):
-            refresh()
+        # ``update_settings`` already emits "settings", which refreshes the
+        # history view through its service listener.
         self._status("剪贴板设置已保存")
 
     def _clear_history(self) -> None:
@@ -333,9 +332,8 @@ class ClipboardSettingsPanel(tk.Frame):
         flash = getattr(self.view, "_flash", None)
         if callable(flash):
             flash(f"已清空 {removed} 条记录")
-        refresh = getattr(self.view, "refresh", None)
-        if callable(refresh):
-            refresh()
+        # ``clear_history`` already emits "cleared"; the view listener has
+        # refreshed the (now empty) list.
         self._status(f"已清空 {removed} 条记录")
 
     def _open_data_dir(self) -> None:

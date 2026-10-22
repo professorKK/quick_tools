@@ -392,6 +392,91 @@ def test_ui_first_open_fits_card_actions(tmp_path: Path) -> None:
         root.destroy()
 
 
+def test_ui_large_list_renders_progressively(setup) -> None:
+    root, _window, view, service, _backend, *_rest = setup
+    for index in range(40):
+        service.store.add(
+            ClipboardContent(
+                kind=ClipboardKind.TEXT,
+                text=f"批量记录 {index}",
+            )
+        )
+
+    view.refresh(reset_scroll=True)
+    total = len(view._entries)
+    assert total > view.INITIAL_CARD_COUNT
+    assert len(view._card_rows) == view.INITIAL_CARD_COUNT
+    assert view._render_job is not None
+
+    deadline = time.monotonic() + 5
+    while len(view._card_rows) < total and time.monotonic() < deadline:
+        root.update()
+        time.sleep(0.005)
+    assert len(view._card_rows) == total
+    assert view._render_job is None
+
+
+def test_ui_copy_does_not_refresh_list(setup, monkeypatch) -> None:
+    root, _window, view, service, backend, text_entry, _image_entry, _file_entry = setup
+    view._select(text_entry.id)
+    root.update()
+    calls: list[int] = []
+    original_refresh = view.refresh
+
+    def counted(*args, **kwargs):
+        calls.append(1)
+        return original_refresh(*args, **kwargs)
+
+    monkeypatch.setattr(view, "refresh", counted)
+    view._copy_entry(service.get(text_entry.id))
+    assert backend.text_writes == ["unique 文本内容"]
+    assert calls == []
+    assert view._selected_id == text_entry.id
+    assert view._message_var.get() == "已复制到剪贴板"
+    assert view._source_detail_var is not None
+    assert "共复制 2 次" in view._source_detail_var.get()
+
+
+def test_ui_editing_survives_copy(setup) -> None:
+    root, _window, view, service, _backend, text_entry, _image_entry, _file_entry = setup
+    view._select(text_entry.id)
+    root.update()
+    editor = view._text_editor
+    assert editor is not None
+    editor.focus_set()
+    root.update()
+    editor.insert("end", "a")
+    editor.edit_modified(True)
+    view._on_text_modified()
+
+    view._copy_entry(service.get(text_entry.id))
+    root.update()
+    assert view._text_editor is editor
+    assert root.focus_get() is editor
+
+    editor.insert("end", "b")
+    editor.edit_modified(True)
+    view._on_text_modified()
+    view._flush_text_edit()
+    root.update()
+    assert service.get(text_entry.id).text_content.endswith("ab")
+
+
+def test_ui_delete_refreshes_once(setup, monkeypatch) -> None:
+    _root, _window, view, service, _backend, _text_entry, image_entry, _file_entry = setup
+    calls: list[int] = []
+    original_refresh = view.refresh
+
+    def counted(*args, **kwargs):
+        calls.append(1)
+        return original_refresh(*args, **kwargs)
+
+    monkeypatch.setattr(view, "refresh", counted)
+    view._delete_entry(image_entry.id)
+    assert service.get(image_entry.id) is None
+    assert calls == [1]
+
+
 def test_ui_settings_entry_uses_shared_dialog(setup) -> None:
     _root, _window, view, _service, _backend, _text_entry, _image_entry, _file_entry = setup
     calls: list[bool] = []
@@ -410,10 +495,19 @@ def test_clipboard_settings_panel_saves(setup, monkeypatch) -> None:
         panel = ClipboardSettingsPanel(host, view)
         panel.pack(fill="both", expand=True)
         root.update_idletasks()
+        calls: list[int] = []
+        original_refresh = view.refresh
+
+        def counted(*args, **kwargs):
+            calls.append(1)
+            return original_refresh(*args, **kwargs)
+
+        monkeypatch.setattr(view, "refresh", counted)
         panel.entries_var.set("100")
         panel._save()
         root.update_idletasks()
         assert service.settings.max_entries == 100
+        assert len(calls) == 1
 
         monkeypatch.setattr(
             "quicktools.plugins.clipboard.settings_view.messagebox.askyesno",
@@ -421,5 +515,6 @@ def test_clipboard_settings_panel_saves(setup, monkeypatch) -> None:
         )
         panel._clear_history()
         assert service.counts()["all"] == 0
+        assert len(calls) == 2
     finally:
         host.destroy()

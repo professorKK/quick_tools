@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import time
 import tkinter as tk
 from pathlib import Path
 from tkinter import messagebox
@@ -62,6 +63,12 @@ CARD_HOVER = "#f8fafc"
 
 
 class ClipboardView(tk.Frame):
+    # Render the first screen synchronously so the window appears quickly;
+    # the rest is appended in short, time-budgeted background chunks.
+    INITIAL_CARD_COUNT = 10
+    CARD_CHUNK_BUDGET_SECONDS = 0.025
+    CARD_CHUNK_DELAY_MS = 10
+
     def __init__(
         self,
         master: tk.Misc,
@@ -82,11 +89,15 @@ class ClipboardView(tk.Frame):
         self._newest_first = True
         self._search_job: str | None = None
         self._flash_job: str | None = None
+        self._render_job: str | None = None
+        self._render_generation = 0
+        self._render_cursor = 0
         self._card_rows: dict[int, list[tk.Widget]] = {}
         self._card_labels: dict[int, dict[str, tk.Label]] = {}
         self._card_actions: dict[int, CardActionBar] = {}
         self._current_entry: ClipboardEntry | None = None
         self._detail_signature: tuple | None = None
+        self._source_detail_var: tk.StringVar | None = None
         self._text_editor: tk.Text | None = None
         self._edit_save_job: str | None = None
         self._edit_dirty = False
@@ -396,7 +407,18 @@ class ClipboardView(tk.Frame):
         for name, item in self._nav_items.items():
             item.set_selected(name == key)
 
+    def _cancel_pending_render(self) -> None:
+        job = self._render_job
+        self._render_job = None
+        self._render_generation += 1
+        if job is not None:
+            try:
+                self.after_cancel(job)
+            except tk.TclError:
+                pass
+
     def _render_list(self, *, reset_scroll: bool) -> None:
+        self._cancel_pending_render()
         inner = self.list_scroll.inner
         try:
             previous = self.list_scroll.canvas.yview()[0]
@@ -431,9 +453,29 @@ class ClipboardView(tk.Frame):
                     fg=MUTED,
                     font=self.fonts.u(9),
                 ).pack(pady=(6, 0))
-        else:
-            for entry in self._entries:
-                self._make_card(inner, entry)
+            self._render_cursor = 0
+            self.update_idletasks()
+            if reset_scroll:
+                self.list_scroll.scroll_to_top()
+            else:
+                try:
+                    self.list_scroll.canvas.yview_moveto(previous)
+                except tk.TclError:
+                    pass
+            return
+
+        # Only page in on a fresh list. A refresh that must preserve the
+        # scroll position (new capture, copy, delete) is built synchronously
+        # so the viewport does not drift while rows are appended.
+        progressive = (
+            reset_scroll and len(self._entries) > self.INITIAL_CARD_COUNT
+        )
+        initial = (
+            self.INITIAL_CARD_COUNT if progressive else len(self._entries)
+        )
+        for entry in self._entries[:initial]:
+            self._make_card(inner, entry)
+        self._render_cursor = initial
 
         self.update_idletasks()
         if reset_scroll:
@@ -443,6 +485,39 @@ class ClipboardView(tk.Frame):
                 self.list_scroll.canvas.yview_moveto(previous)
             except tk.TclError:
                 pass
+
+        if progressive:
+            generation = self._render_generation
+            self._render_job = self.after(
+                self.CARD_CHUNK_DELAY_MS,
+                lambda: self._render_more_cards(generation),
+            )
+
+    def _render_more_cards(self, generation: int) -> None:
+        self._render_job = None
+        if generation != self._render_generation or self._detached:
+            return
+        try:
+            if not self.winfo_exists():
+                return
+            inner = self.list_scroll.inner
+        except tk.TclError:
+            return
+
+        cursor = self._render_cursor
+        total = len(self._entries)
+        deadline = time.perf_counter() + self.CARD_CHUNK_BUDGET_SECONDS
+        while cursor < total:
+            self._make_card(inner, self._entries[cursor])
+            cursor += 1
+            if time.perf_counter() >= deadline:
+                break
+        self._render_cursor = cursor
+        if cursor < total:
+            self._render_job = self.after(
+                self.CARD_CHUNK_DELAY_MS,
+                lambda: self._render_more_cards(generation),
+            )
 
     def _make_card(self, parent: tk.Misc, entry: ClipboardEntry) -> None:
         selected = entry.id == self._selected_id
@@ -687,6 +762,7 @@ class ClipboardView(tk.Frame):
         for child in inner.winfo_children():
             child.destroy()
 
+        self._source_detail_var = None
         self._preview_photo = None
         self._thumb_photo = None
 
@@ -1148,6 +1224,13 @@ class ClipboardView(tk.Frame):
             font=self.fonts.u(8),
         ).pack(fill="x", pady=(5, 0))
 
+    @staticmethod
+    def _source_detail_text(entry: ClipboardEntry) -> str:
+        detail = format_time(entry.last_copied_at, detail=True)
+        if entry.copy_count > 1:
+            detail += f" · 共复制 {entry.copy_count} 次"
+        return detail
+
     def _build_source_card(self, parent: tk.Misc, entry: ClipboardEntry) -> None:
         self._section_label(parent, "复制来源")
         card = self._bordered(parent)
@@ -1160,12 +1243,12 @@ class ClipboardView(tk.Frame):
             anchor="w",
             font=self.fonts.u(9),
         ).pack(fill="x", padx=10, pady=(8, 2))
-        detail = format_time(entry.last_copied_at, detail=True)
-        if entry.copy_count > 1:
-            detail += f" · 共复制 {entry.copy_count} 次"
+        self._source_detail_var = tk.StringVar(
+            value=self._source_detail_text(entry)
+        )
         tk.Label(
             card,
-            text=detail,
+            textvariable=self._source_detail_var,
             bg=PANEL_ALT,
             fg=MUTED,
             anchor="w",
@@ -1240,8 +1323,9 @@ class ClipboardView(tk.Frame):
                 "无法复制", str(exc), parent=self.winfo_toplevel()
             )
             return
-        self._flash("已复制到剪贴板")
-        self.refresh()
+        # ``service.copy_entry`` emits the synchronous "copied" event; the
+        # view only updates the flash and the selected entry's copy count,
+        # never rebuilding the list (copying does not change its contents).
 
     def _copy_path(self, path: str) -> None:
         if self.service is None:
@@ -1332,10 +1416,9 @@ class ClipboardView(tk.Frame):
             )
             return
         if deleted:
-            if self._selected_id == entry_id:
-                self._selected_id = None
+            # The synchronous "deleted" event already refreshed the list and
+            # moved the selection to a surviving entry.
             self._flash("已删除该记录")
-            self.refresh()
 
     # ------------------------------------------------------------------ search
     def _on_search_changed(self, *_args) -> None:
@@ -1424,6 +1507,29 @@ class ClipboardView(tk.Frame):
         except tk.TclError:
             pass
 
+    def _refresh_copied_detail(self, entry_id: int | None) -> None:
+        """Update only the re-copy counter; the list itself is unchanged."""
+        if entry_id is None or self.service is None:
+            return
+        entry = self.service.get(entry_id)
+        if entry is None:
+            return
+        self._entries = [
+            entry if item.id == entry_id else item for item in self._entries
+        ]
+        if self._selected_id != entry_id:
+            return
+        self._current_entry = entry
+        # Keep the signature in sync so selecting this entry again does not
+        # rebuild the whole detail pane just for the counter.
+        self._detail_signature = self._entry_detail_signature(entry)
+        var = self._source_detail_var
+        if var is not None:
+            try:
+                var.set(self._source_detail_text(entry))
+            except tk.TclError:
+                pass
+
     def _on_service_event(self, event: str, entry_id: int | None) -> None:
         if self._detached:
             return
@@ -1433,6 +1539,8 @@ class ClipboardView(tk.Frame):
             return
         if event == "copied":
             self._flash("已复制到剪贴板")
+            self._refresh_copied_detail(entry_id)
+            return
         self.refresh(reset_scroll=False)
 
     # --------------------------------------------------------------- settings
@@ -1537,6 +1645,7 @@ class ClipboardView(tk.Frame):
         except Exception:
             log.exception("窗口关闭时保存剪贴板编辑失败")
         self._cancel_edit_timer()
+        self._cancel_pending_render()
         self._text_editor = None
         self._edit_dirty = False
         self._detached = True

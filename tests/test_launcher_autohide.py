@@ -536,6 +536,47 @@ def test_pinned_plugin_skips_focus_loss_auto_hide(tools, monkeypatch) -> None:
     assert withdrawn == []
 
 
+@pytest.mark.skipif(
+    not sys.platform.startswith("linux"), reason="X11 click-to-focus"
+)
+def test_plugin_window_has_click_refocus_binding(tools) -> None:
+    launcher, _root = tools
+    window = _plugin_window(launcher)
+    assert window.bind("<ButtonPress-1>")
+
+
+def test_click_restores_native_focus_for_pinned_window(tools, monkeypatch) -> None:
+    launcher, _root = tools
+    window = _plugin_window(launcher)
+    calls: list[tk.Misc] = []
+    monkeypatch.setattr(launcher_module, "is_foreground", lambda _w: False)
+    monkeypatch.setattr(
+        launcher_module,
+        "force_foreground",
+        lambda w: calls.append(w) or True,
+    )
+
+    launcher._restore_plugin_focus(window)
+
+    assert calls == [window]
+
+
+def test_click_skips_refocus_when_window_is_foreground(tools, monkeypatch) -> None:
+    launcher, _root = tools
+    window = _plugin_window(launcher)
+    calls: list[tk.Misc] = []
+    monkeypatch.setattr(launcher_module, "is_foreground", lambda _w: True)
+    monkeypatch.setattr(
+        launcher_module,
+        "force_foreground",
+        lambda w: calls.append(w) or True,
+    )
+
+    launcher._restore_plugin_focus(window)
+
+    assert calls == []
+
+
 def test_plugin_stays_visible_while_child_dialog_is_open(
     tools, monkeypatch
 ) -> None:

@@ -919,6 +919,32 @@ class Launcher:
             lambda _event, w=window: self._on_plugin_focus_out(w),
             add="+",
         )
+        if sys.platform.startswith("linux"):
+            # Override-redirect windows get no click-to-focus from the window
+            # manager. A pinned window stays visible after losing focus, so
+            # clicking back into it must restore the real X11 input focus;
+            # otherwise keystrokes continue going to the other application.
+            window.bind(
+                "<ButtonPress-1>",
+                lambda _event, w=window: self._restore_plugin_focus(w),
+                add="+",
+            )
+
+    def _restore_plugin_focus(self, window: tk.Misc) -> None:
+        """Route keyboard input back to a clicked frameless plugin window.
+
+        Only ``XSetInputFocus`` is issued; Tk's focus model already points at
+        the widget that handled the click (for example the detail Text), so
+        text editing keeps working.
+        """
+        if not self._exists(window):
+            return
+        try:
+            if is_foreground(window):
+                return
+            force_foreground(window)
+        except Exception:
+            log.debug("恢复插件窗口原生焦点失败", exc_info=True)
 
     def _mark_plugin_shown(self, window: tk.Toplevel) -> None:
         self._cancel_plugin_focus_job(window)
