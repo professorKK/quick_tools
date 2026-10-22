@@ -80,6 +80,29 @@ def test_order_counts_and_search(store: ClipboardStore) -> None:
     ]
 
 
+def test_mark_copied_keeps_history_position(
+    store: ClipboardStore,
+) -> None:
+    first = store.add(
+        ClipboardContent(kind=ClipboardKind.TEXT, text="older")
+    )
+    second = store.add(
+        ClipboardContent(kind=ClipboardKind.TEXT, text="newer")
+    )
+    before = store.get(first.id)
+    assert before is not None
+
+    updated = store.mark_copied(first.id)
+
+    assert updated is not None
+    assert updated.copy_count == before.copy_count + 1
+    assert updated.last_copied_at == before.last_copied_at
+    assert [entry.id for entry in store.list_entries()] == [
+        second.id,
+        first.id,
+    ]
+
+
 def test_image_storage_and_dedupe(store: ClipboardStore, tmp_path: Path) -> None:
     content = ClipboardContent(
         kind=ClipboardKind.IMAGE, image_png=png_bytes(), source="screenshot"

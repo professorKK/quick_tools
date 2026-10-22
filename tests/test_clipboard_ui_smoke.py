@@ -3,6 +3,7 @@ from __future__ import annotations
 import io
 import os
 import sys
+import time
 import tkinter as tk
 from pathlib import Path
 from typing import Callable, Sequence
@@ -116,6 +117,10 @@ def setup(tmp_path: Path):
         pass
 
 
+def card_action(view: ClipboardView, entry_id: int, kind: str):
+    return view._card_actions[entry_id].actions[kind]
+
+
 def test_ui_lists_and_selects_entries(setup) -> None:
     root, _window, view, _service, _backend, text_entry, image_entry, file_entry = setup
     assert not hasattr(view, "pin_button")
@@ -125,18 +130,44 @@ def test_ui_lists_and_selects_entries(setup) -> None:
     view._select(text_entry.id)
     root.update()
     assert view._detail_title_var.get() == "unique 文本内容"
-    assert view._reveal_button._enabled is False
+    assert card_action(view, text_entry.id, "reveal")._enabled is False
 
     view._select(image_entry.id)
     root.update()
     assert view._detail_title_var.get().startswith("图片")
-    assert view._reveal_button._enabled is True
+    assert card_action(view, image_entry.id, "reveal")._enabled is True
     assert view._preview_photo is not None
 
     view._select(file_entry.id)
     root.update()
-    assert view._reveal_button._enabled is True
+    assert card_action(view, file_entry.id, "reveal")._enabled is True
     assert view._detail_title_var.get() == "sample.txt"
+
+
+def test_ui_card_actions_use_icons(setup, monkeypatch) -> None:
+    root, _window, view, service, backend, text_entry, image_entry, _file_entry = setup
+
+    for entry_id in (text_entry.id, image_entry.id):
+        bar = view._card_actions[entry_id]
+        assert isinstance(bar, tk.Canvas)
+        assert list(bar.actions) == ["copy", "reveal", "delete"]
+        assert bar._kind_at(5) == "copy"
+        assert bar._kind_at(30) == "reveal"
+        assert bar._kind_at(60) == "delete"
+        assert bar._kind_at(26) is None
+
+    calls: list[int] = []
+    monkeypatch.setattr(view, "_reveal_entry", lambda entry: calls.append(entry.id))
+    card_action(view, image_entry.id, "reveal")._command()
+    assert calls == [image_entry.id]
+
+    card_action(view, text_entry.id, "copy")._command()
+    root.update()
+    assert backend.text_writes == ["unique 文本内容"]
+
+    card_action(view, text_entry.id, "delete")._command()
+    root.update()
+    assert service.get(text_entry.id) is None
 
 
 def test_ui_search_filter_and_delete(setup) -> None:
@@ -297,6 +328,68 @@ def test_ui_copy_and_detach(setup) -> None:
     window.destroy()
     root.update()
     assert service._listeners == []
+
+
+def test_ui_first_open_fits_card_actions(tmp_path: Path) -> None:
+    """The list must apply its final width on first map, not only on resize.
+
+    The plugin window is created while withdrawn. Tk can deliver the final
+    <Configure> before mapping, and no later <Configure> arrives, so the
+    scrollable inner frame would keep its requested width and clip the
+    right-aligned time label and action icons.
+    """
+    root = tk.Tk()
+    root.geometry("1000x640+60+60")
+    root.update()
+    backend = FakeBackend()
+    service = ClipboardService(tmp_path, root, backend=backend)
+    service.start()
+    for index in range(20):
+        service.store.add(
+            ClipboardContent(
+                kind=ClipboardKind.TEXT,
+                text=(
+                    f"{index} 这是一条很长的剪贴板文本内容，用来复现首次打开时"
+                    "右侧操作图标被裁切的问题。"
+                ),
+            )
+        )
+
+    window = tk.Toplevel(root)
+    window.withdraw()
+    view = ClipboardView(window, service)
+    view.pack(fill="both", expand=True)
+    try:
+        window.geometry("1000x640+80+80")
+        # Lay the withdrawn window out at its final size; this sends the
+        # canvas its last <Configure> before it is mapped.
+        window.update_idletasks()
+        window.deiconify()
+        deadline = time.monotonic() + 2.0
+        while (
+            not view.list_scroll.canvas.winfo_ismapped()
+            and time.monotonic() < deadline
+        ):
+            root.update()
+            time.sleep(0.01)
+        root.update()
+
+        canvas = view.list_scroll.canvas
+        canvas_width = canvas.winfo_width()
+        assert canvas_width > 1
+        assert abs(view.list_scroll.inner.winfo_width() - canvas_width) <= 1
+        viewport_right = canvas.winfo_rootx() + canvas_width
+        entry_id = next(iter(view._card_actions))
+        bar = view._card_actions[entry_id]
+        assert bar.winfo_rootx() + bar.winfo_width() <= viewport_right
+    finally:
+        window.destroy()
+        service.stop()
+        try:
+            root.update()
+        except tk.TclError:
+            pass
+        root.destroy()
 
 
 def test_ui_settings_entry_uses_shared_dialog(setup) -> None:

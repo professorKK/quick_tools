@@ -317,7 +317,10 @@ class ClipboardService:
                 raise
             raise ClipboardError(str(exc) or exc.__class__.__name__) from exc
 
-        updated = self.store.touch(entry.id)
+        # Re-copying from history increments the counter but must not bump
+        # last_copied_at: 二次复制 is a paste helper, so the list keeps its
+        # current order instead of moving the entry to the top.
+        updated = self.store.mark_copied(entry.id)
         self._notify("copied", entry.id)
         return updated
 

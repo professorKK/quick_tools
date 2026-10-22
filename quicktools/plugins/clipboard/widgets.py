@@ -11,12 +11,17 @@ from quicktools.ui_theme import (
     BORDER,
     BUTTON,
     BUTTON_HOVER,
+    BUTTON_PRESSED,
+    DANGER,
+    DISABLED_TEXT,
     MUTED,
     PANEL,
     ROW_ACTIVE,
     TEXT,
     Fonts,
+    round_rect,
 )
+from quicktools.window_frame import Tooltip
 
 from .models import ClipboardKind
 
@@ -53,6 +58,261 @@ class TypeBadge(tk.Frame):
             font=fonts.u(max(11, size // 3), "bold"),
         )
         self.label.pack(fill="both", expand=True)
+
+
+class CardAction:
+    """Logical action occupying one hit zone of ``CardActionBar``."""
+
+    def __init__(
+        self,
+        bar: "CardActionBar",
+        kind: str,
+        command: Callable[[], None],
+        tooltip: str,
+        *,
+        enabled: bool = True,
+        danger: bool = False,
+    ) -> None:
+        self.kind = kind
+        self._bar = bar
+        self._command = command
+        self.tooltip = tooltip
+        self._enabled = enabled
+        self._danger = danger
+
+    def invoke(self) -> None:
+        if self._enabled:
+            self._command()
+
+    def set_enabled(self, enabled: bool) -> None:
+        self._enabled = bool(enabled)
+        self._bar._draw()
+
+
+class CardActionBar(tk.Canvas):
+    """Three icon actions painted in a single canvas.
+
+    One canvas per history row instead of three keeps opening a large
+    clipboard history fast: Tk widget creation dominates list rendering.
+    """
+
+    SIZE = 26
+    GAP = 2
+    KIND_ORDER = ("copy", "reveal", "delete")
+
+    def __init__(
+        self,
+        master: tk.Misc,
+        handlers: dict[str, Callable[[], None]],
+        *,
+        fonts: Fonts,
+        bg: str = PANEL,
+        reveal_enabled: bool = True,
+        reveal_tooltip: str = "打开位置",
+        size: int = SIZE,
+    ) -> None:
+        stride = size + self.GAP
+        width = stride * len(self.KIND_ORDER) - self.GAP
+        super().__init__(
+            master,
+            width=width,
+            height=size,
+            bg=bg,
+            highlightthickness=0,
+            bd=0,
+        )
+        self._size = size
+        self._stride = stride
+        self._fonts = fonts
+        self._idle_bg = bg
+        self._hover_bg = BUTTON_HOVER
+        self._press_bg = BUTTON_PRESSED
+        self._hovered: str | None = None
+        self._pressed: str | None = None
+        self._tooltip: Tooltip | None = None
+        self.actions = {
+            "copy": CardAction(
+                self, "copy", handlers["copy"], "二次复制"
+            ),
+            "reveal": CardAction(
+                self,
+                "reveal",
+                handlers["reveal"],
+                reveal_tooltip,
+                enabled=reveal_enabled,
+            ),
+            "delete": CardAction(
+                self,
+                "delete",
+                handlers["delete"],
+                "删除该记录",
+                danger=True,
+            ),
+        }
+        self._draw()
+        self.bind("<Enter>", self._on_pointer)
+        self.bind("<Motion>", self._on_pointer)
+        self.bind("<Leave>", self._on_leave)
+        self.bind("<ButtonPress-1>", self._on_press)
+        self.bind("<ButtonRelease-1>", self._on_release)
+
+    # --------------------------------------------------------------- paint
+    def _zone_x(self, kind: str) -> float:
+        return self.KIND_ORDER.index(kind) * self._stride
+
+    def _kind_at(self, x: float) -> str | None:
+        if x < 0:
+            return None
+        index = int(x // self._stride)
+        if not 0 <= index < len(self.KIND_ORDER):
+            return None
+        if x - index * self._stride >= self._size:
+            return None
+        return self.KIND_ORDER[index]
+
+    def _surface(self, kind: str) -> str:
+        if self._pressed == kind:
+            return self._press_bg
+        if self._hovered == kind:
+            return self._hover_bg
+        return self._idle_bg
+
+    def _xy(
+        self, x: float, y: float, dx: float = 0.0
+    ) -> tuple[float, float]:
+        scale = self._size / 24
+        return dx + x * scale, y * scale
+
+    def _line(self, points, fg: str, width: float, dx: float = 0.0) -> None:
+        coords: list[float] = []
+        for x, y in points:
+            coords.extend(self._xy(x, y, dx))
+        self.create_line(
+            coords,
+            fill=fg,
+            width=width,
+            capstyle="round",
+            joinstyle="round",
+        )
+
+    def _draw(self) -> None:
+        self.delete("all")
+        width = self._size / 14
+        for kind in self.KIND_ORDER:
+            action = self.actions[kind]
+            dx = self._zone_x(kind)
+            surface = self._surface(kind)
+            if action._enabled and (self._hovered == kind or self._pressed == kind):
+                round_rect(
+                    self,
+                    dx + 1,
+                    1,
+                    dx + self._size - 1,
+                    self._size - 1,
+                    radius=6,
+                    fill=surface,
+                )
+            if not action._enabled:
+                fg = DISABLED_TEXT
+            elif action._danger:
+                fg = DANGER
+            else:
+                fg = MUTED
+            if kind == "copy":
+                self._draw_copy(fg, width, surface, dx)
+            elif kind == "reveal":
+                self._draw_reveal(fg, width, dx)
+            else:
+                self._draw_delete(fg, width, dx)
+
+    def _draw_copy(
+        self, fg: str, width: float, surface: str, dx: float
+    ) -> None:
+        scale = self._size / 24
+        radius = max(2, 2 * scale)
+        x1, y1 = self._xy(9, 3.5, dx)
+        x2, y2 = self._xy(20.5, 15, dx)
+        round_rect(
+            self, x1, y1, x2, y2, radius, fill="", outline=fg, width=width
+        )
+        x1, y1 = self._xy(3.5, 9, dx)
+        x2, y2 = self._xy(15, 20.5, dx)
+        round_rect(
+            self,
+            x1,
+            y1,
+            x2,
+            y2,
+            radius,
+            fill=surface,
+            outline=fg,
+            width=width,
+        )
+
+    def _draw_reveal(self, fg: str, width: float, dx: float) -> None:
+        points = [(3, 7), (9, 7), (11, 9), (21, 9), (21, 19), (3, 19)]
+        self._line(points + [points[0]], fg, width, dx)
+
+    def _draw_delete(self, fg: str, width: float, dx: float) -> None:
+        self._line([(4, 7), (20, 7)], fg, width, dx)
+        self._line([(9, 7), (9, 4), (15, 4), (15, 7)], fg, width, dx)
+        self._line([(6, 7), (7, 20), (17, 20), (18, 7)], fg, width, dx)
+        self._line([(10, 10), (10.5, 17)], fg, width, dx)
+        self._line([(14, 10), (13.5, 17)], fg, width, dx)
+
+    # ---------------------------------------------------------------- state
+    def _on_pointer(self, event: tk.Event) -> None:
+        self._set_hovered(self._kind_at(event.x))
+
+    def _set_hovered(self, kind: str | None) -> None:
+        if kind == self._hovered:
+            return
+        self._hovered = kind
+        self.configure(
+            cursor="hand2" if kind and self.actions[kind]._enabled else ""
+        )
+        self._draw()
+        self._update_tooltip()
+
+    def _update_tooltip(self) -> None:
+        kind = self._hovered
+        if kind is None:
+            if self._tooltip is not None:
+                self._tooltip.hide()
+            return
+        text = self.actions[kind].tooltip
+        if self._tooltip is None:
+            # Created on first hover so opening a big history does not pay
+            # for one Tooltip object per row.
+            self._tooltip = Tooltip(self, text, fonts=self._fonts)
+        else:
+            self._tooltip.hide()
+            self._tooltip.text = text
+        self._tooltip.schedule()
+
+    def _on_leave(self, _event=None) -> None:
+        self._pressed = None
+        self._set_hovered(None)
+        self.configure(cursor="")
+
+    def _on_press(self, event: tk.Event) -> None:
+        kind = self._kind_at(event.x)
+        if kind is not None and self.actions[kind]._enabled:
+            self._pressed = kind
+            self._draw()
+
+    def _on_release(self, event: tk.Event) -> None:
+        kind = self._kind_at(event.x)
+        pressed = self._pressed
+        self._pressed = None
+        self._draw()
+        if pressed is not None and kind == pressed:
+            self.actions[pressed].invoke()
+
+    def set_background(self, bg: str) -> None:
+        self._idle_bg = bg
+        self.configure(bg=bg)
+        self._draw()
 
 
 class NavItem(tk.Frame):
@@ -271,6 +531,11 @@ class ScrollableFrame(tk.Frame):
         )
         self.inner.bind("<Configure>", self._on_inner_configure)
         self.canvas.bind("<Configure>", self._on_canvas_configure)
+        # A window created while the plugin Toplevel is withdrawn can receive
+        # its final <Configure> before mapping. Tk then embeds ``inner`` at its
+        # requested width on the first map and never sends another <Configure>,
+        # which clips right-aligned row actions. Re-apply the width on <Map>.
+        self.canvas.bind("<Map>", self._on_canvas_map, add="+")
         bind_wheel_recursive(self.canvas, self._on_wheel)
         bind_wheel_recursive(self.inner, self._on_wheel)
 
@@ -281,6 +546,11 @@ class ScrollableFrame(tk.Frame):
 
     def _on_canvas_configure(self, event: tk.Event) -> None:
         self.canvas.itemconfigure(self._window, width=event.width)
+
+    def _on_canvas_map(self, _event=None) -> None:
+        width = self.canvas.winfo_width()
+        if width > 1:
+            self.canvas.itemconfigure(self._window, width=width)
 
     def _on_wheel(self, event: tk.Event) -> str:
         if getattr(event, "num", None) == 4:

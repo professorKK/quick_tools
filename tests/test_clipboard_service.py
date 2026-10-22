@@ -212,6 +212,31 @@ def test_copy_entry_suppresses_echo(service) -> None:
     assert instance.entries()[0].copy_count == 2
 
 
+def test_copy_entry_keeps_history_order(service, monkeypatch) -> None:
+    instance, _backend, root, _tmp_path = service
+    instance.start()
+    times = iter([100.0, 200.0])
+    monkeypatch.setattr(instance.store, "_clock", lambda: next(times))
+    root.run_once()
+    _backend.emit(
+        ClipboardContent(kind=ClipboardKind.TEXT, text="older")
+    )
+    drain(root)
+    _backend.emit(
+        ClipboardContent(kind=ClipboardKind.TEXT, text="newer")
+    )
+    drain(root)
+    newer, older = instance.entries()
+
+    updated = instance.copy_entry(older)
+
+    assert updated is not None and updated.copy_count == 2
+    entries = instance.entries()
+    assert [entry.text_content for entry in entries] == ["newer", "older"]
+    assert entries[0].id == newer.id
+    assert entries[1].id == older.id
+
+
 def test_copy_image_entry(service) -> None:
     instance, backend, root, _tmp_path = service
     instance.start()

@@ -3,12 +3,14 @@ from __future__ import annotations
 import os
 import sys
 import tkinter as tk
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
 from quicktools import launcher as launcher_module
 from quicktools.launcher import Launcher
+from quicktools.plugin_api import PluginMeta
 from quicktools.plugin_loader import PluginLoader
 
 pytestmark = pytest.mark.skipif(
@@ -139,6 +141,51 @@ def test_show_centers_before_mapping_on_x11(tools, monkeypatch) -> None:
     launcher.show()
 
     assert events[:2] == ["center", "map"]
+
+
+def test_show_preserves_user_resized_window(tools, monkeypatch) -> None:
+    launcher, root = tools
+    launcher.window.deiconify()
+    launcher.window.geometry("1000x650")
+    root.update()
+    sizes: list[tuple[int, int]] = []
+    monkeypatch.setattr(
+        launcher_module,
+        "center_on_screen",
+        lambda _window, width, height: sizes.append((width, height)),
+    )
+
+    launcher.show()
+
+    assert sizes == [(1000, 650)]
+
+
+def test_card_status_keeps_requested_width(tools) -> None:
+    launcher, root = tools
+    meta = PluginMeta(
+        id="long-summary",
+        name="长摘要插件",
+        description="",
+        summary="这是一段很长的插件说明，用来占满卡片中除状态文字以外的可用宽度" * 2,
+        version="1",
+        entry="plugin.py",
+        class_name="P",
+        folder=Path("/tmp"),
+    )
+    window = tk.Toplevel(root)
+    window.withdraw()
+    launcher._plugin_windows[meta.id] = window
+    card = launcher._make_card(meta)
+    card.grid(row=0, column=0, sticky="nsew", padx=5, pady=4)
+    launcher.window.deiconify()
+    root.update()
+
+    status = next(
+        child
+        for child in card.winfo_children()[0].winfo_children()
+        if isinstance(child, tk.Label) and child.cget("text") == "已打开"
+    )
+    assert status.winfo_width() >= status.winfo_reqwidth()
 
 
 def test_hide_disarms_and_cancels_pending_job(tools, monkeypatch) -> None:

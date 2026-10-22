@@ -173,6 +173,33 @@ def test_editor_copy_and_close(root: tk.Tk) -> None:
     assert closed == [True]
 
 
+def test_editor_close_copies_the_rendered_image(root: tk.Tk) -> None:
+    copied: list[Image.Image] = []
+    autosaved: list[Image.Image] = []
+    closed: list[bool] = []
+    editor = CaptureEditor(
+        root,
+        Image.new("RGB", (120, 80), "white"),
+        ScreenshotSettings(),
+        on_copy=copied.append,
+        on_save=lambda _image, _path: None,
+        on_close=closed.append,
+        on_autosave=autosaved.append,
+    )
+    editor.withdraw()
+    root.update()
+
+    editor.document.add_number(Point(10, 10), editor.edit_style)
+    editor._on_document_changed()
+    editor.close()
+    root.update()
+
+    assert autosaved
+    assert len(copied) == 1
+    assert copied[0].size == (120, 80)
+    assert closed == [True]
+
+
 def test_editor_close_and_return(root: tk.Tk) -> None:
     image = Image.new("RGB", (120, 80), (5, 6, 7))
     closed: list[bool] = []

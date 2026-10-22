@@ -492,6 +492,21 @@ class CaptureEditor(tk.Toplevel):
         self.show_toast("已复制到剪贴板")
         self._flash_copy_button()
 
+    def _copy_on_close(self) -> None:
+        """Copy the final image before the editor closes.
+
+        Closing ends the screenshot workflow and users immediately paste the
+        result, so they should not need to press "复制" first.  A clipboard
+        failure is logged but must never block closing.
+        """
+        try:
+            self._canvas.commit_pending_entry()
+            rendered = self._canvas.render()
+            self.on_copy(rendered)
+        except Exception as exc:
+            log.exception("关闭截图时自动复制失败")
+            self._status_var.set(f"自动复制失败：{exc}")
+
     def save(self) -> None:
         try:
             self._canvas.commit_pending_entry()
@@ -596,6 +611,7 @@ class CaptureEditor(tk.Toplevel):
             )
             if not confirmed:
                 return
+        self._copy_on_close()
         self._finish(return_to_assistant=return_to_assistant)
 
     def _finish(self, return_to_assistant: bool = False) -> None:

@@ -380,13 +380,17 @@ class ClipboardStore:
         return result
 
     # ------------------------------------------------------------ mutate
-    def touch(self, entry_id: int) -> ClipboardEntry | None:
-        now = self._clock()
+    def mark_copied(self, entry_id: int) -> ClipboardEntry | None:
+        """Count a manual re-copy without moving the entry to the top.
+
+        Only fresh ``add()`` calls update ``last_copied_at`` and therefore the
+        history order.  Clicking "二次复制" in the history is a paste helper,
+        not a new capture, and must leave the list position unchanged.
+        """
         with self._conn:
             self._conn.execute(
-                "UPDATE entries SET last_copied_at = ?, "
-                "copy_count = copy_count + 1 WHERE id = ?",
-                (now, entry_id),
+                "UPDATE entries SET copy_count = copy_count + 1 WHERE id = ?",
+                (entry_id,),
             )
         return self.get(entry_id)
 

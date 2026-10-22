@@ -141,6 +141,10 @@ class Tooltip:
         except tk.TclError:
             self._job = None
 
+    def schedule(self) -> None:
+        """Start the hover delay, e.g. for a lazily created tooltip."""
+        self._schedule()
+
     def _pointer_inside(self, event) -> bool:
         if event is None:
             return False
@@ -416,8 +420,11 @@ class ResizeGrips:
         "e": ("sb_h_double_arrow", "size_we"),
     }
 
-    def __init__(self, window: tk.Misc) -> None:
+    def __init__(
+        self, window: tk.Misc, *, background: str | None = None
+    ) -> None:
         self.window = window
+        self._background = background
         self._grips: list[tuple[tk.Frame, dict]] = []
         self._start = (0, 0, 0, 0, 0, 0)
         self._direction = ""
@@ -470,7 +477,9 @@ class ResizeGrips:
         ]
         for direction, options, background in specs:
             grip = tk.Frame(
-                self.window, bg=background, cursor=self._cursor(direction)
+                self.window,
+                bg=self._background or background,
+                cursor=self._cursor(direction),
             )
             grip.place(**options)
             grip.bind(
@@ -957,11 +966,18 @@ class WindowFrame:
         for tooltip in self._tooltips:
             tooltip.hide()
         if win32_window.minimize(self.window):
+            log.info("插件窗口已隐藏：%s", self._title)
             return
+        iconified = False
         try:
             self.window.iconify()
+            iconified = True
         except tk.TclError:
-            return
+            # Tk rejects iconify() for overrideredirect windows ("override-
+            # redirect flag is set"), and every QuickTools window is built
+            # that way on X11.  Never return here: the title bar button is
+            # labelled "隐藏", so it must still withdraw the window.
+            iconified = False
 
         def hide_if_unmanaged() -> None:
             try:
@@ -969,9 +985,13 @@ class WindowFrame:
                     # Override-redirect windows are not managed by many X11
                     # window managers; withdrawing is the only fallback.
                     self.window.withdraw()
+                    log.info("插件窗口已隐藏：%s", self._title)
             except tk.TclError:
                 pass
 
+        if not iconified:
+            hide_if_unmanaged()
+            return
         try:
             self.window.after(120, hide_if_unmanaged)
         except tk.TclError:

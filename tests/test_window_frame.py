@@ -100,6 +100,25 @@ def test_pin_state_is_tracked_when_x11_ignores_topmost(root: tk.Tk) -> None:
         window.destroy()
 
 
+def test_minimize_falls_back_to_withdraw_for_override_redirect(
+    root: tk.Tk, monkeypatch
+) -> None:
+    window, frame = make_frame(root)
+    try:
+        # X11 Tk rejects iconify() for overrideredirect windows; the title
+        # bar's "隐藏" button must still withdraw the window.
+        def reject_iconify() -> None:
+            raise tk.TclError("override-redirect flag is set")
+
+        monkeypatch.setattr(window, "iconify", reject_iconify)
+        frame.minimize()
+        root.update()
+        assert window.winfo_exists()
+        assert window.winfo_viewable() == 0
+    finally:
+        window.destroy()
+
+
 def test_maximize_and_restore_round_trip(root: tk.Tk) -> None:
     window, frame = make_frame(root)
     try:

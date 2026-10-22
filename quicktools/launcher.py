@@ -39,7 +39,12 @@ from .win32_window import (
     prepare_top_level,
     restore as restore_window,
 )
-from .window_frame import WindowFrame, enable_drag, make_frameless
+from .window_frame import (
+    ResizeGrips,
+    WindowFrame,
+    enable_drag,
+    make_frameless,
+)
 from .window_state import WindowStateStore
 
 if sys.platform == "win32":
@@ -138,6 +143,10 @@ class Launcher:
         make_frameless(self.window)
         self.window.bind("<Map>", self._on_launcher_map, add="+")
         self._build()
+        # The launcher has no window-manager border either, so reuse the same
+        # edge grips plugin windows use. The grip frames are direct children
+        # of the launcher and must blend with the launcher background.
+        self._grips = ResizeGrips(self.window, background=BG)
         self.reload_plugins()
         # Lay out while still hidden so the first hotkey show only has to map
         # an already-built window, not run the whole geometry pass on screen.
@@ -298,6 +307,25 @@ class Launcher:
         # a withdraw/deiconify cycle.
         prepare_top_level(self.window)
         enable_rounded_corners(self.window)
+        grips = getattr(self, "_grips", None)
+        if grips is not None:
+            grips.raise_grips()
+
+    def _window_size(self) -> tuple[int, int]:
+        """Return the launcher size, preserving a user-resized window."""
+        try:
+            width = self.window.winfo_width()
+            height = self.window.winfo_height()
+            max_width = self.window.winfo_screenwidth()
+            max_height = self.window.winfo_screenheight()
+        except tk.TclError:
+            return 860, 560
+        if width <= 1 or height <= 1:
+            return 860, 560
+        return (
+            min(max(720, width), max_width),
+            min(max(480, height), max_height),
+        )
 
     def show(self, *, auto_hide: bool = False) -> None:
         self._cancel_focus_job()
@@ -305,6 +333,7 @@ class Launcher:
         self._had_focus = False
         self._show_started_at = time.perf_counter()
         self._auto_hide_requested = auto_hide
+        width, height = self._window_size()
         try:
             if sys.platform.startswith("linux"):
                 # X11: position the window while it is still withdrawn. The
@@ -312,11 +341,11 @@ class Launcher:
                 # position request that races with the initial map, leaving
                 # the launcher at 0,0 (partly under the desktop top bar and
                 # hard to grab for dragging).
-                center_on_screen(self.window, 860, 560)
+                center_on_screen(self.window, width, height)
                 self.window.deiconify()
             else:
                 self.window.deiconify()
-                center_on_screen(self.window, 860, 560)
+                center_on_screen(self.window, width, height)
             self.window.lift()
             self._focus_search()
             self._activate_window()
@@ -1295,7 +1324,6 @@ class Launcher:
         draw_badge(PANEL_ALT, BADGE_BG)
 
         text_box = tk.Frame(body, bg=PANEL_ALT)
-        text_box.pack(side="left", fill="both", expand=True)
         name = tk.Label(
             text_box,
             text=meta.name,
@@ -1330,7 +1358,21 @@ class Launcher:
             font=self.fonts.u(10 if is_open else 16, "bold"),
             cursor="hand2",
         )
+        # Reserve the status label's width before packing the expanding text
+        # box.  Otherwise a long summary squeezes "已打开" and clips its last
+        # character at the card edge.
         status.pack(side="right", padx=(8, 0))
+        text_box.pack(side="left", fill="both", expand=True)
+
+        def fit_summary(event: tk.Event) -> None:
+            if event.widget is not text_box:
+                return
+            try:
+                summary.configure(wraplength=max(60, event.width - 2))
+            except tk.TclError:
+                pass
+
+        text_box.bind("<Configure>", fit_summary, add="+")
 
         widgets = [card, body, text_box, name, summary, status]
 

@@ -46,6 +46,7 @@ from .platform_utils import (
 )
 from .service import ClipboardService
 from .widgets import (
+    CardActionBar,
     NavItem,
     PlaceholderEntry,
     ScrollableFrame,
@@ -83,6 +84,7 @@ class ClipboardView(tk.Frame):
         self._flash_job: str | None = None
         self._card_rows: dict[int, list[tk.Widget]] = {}
         self._card_labels: dict[int, dict[str, tk.Label]] = {}
+        self._card_actions: dict[int, CardActionBar] = {}
         self._current_entry: ClipboardEntry | None = None
         self._detail_signature: tuple | None = None
         self._text_editor: tk.Text | None = None
@@ -317,41 +319,6 @@ class ClipboardView(tk.Frame):
             font=self.fonts.u(9),
         ).pack(fill="x", pady=(2, 0))
 
-        actions = tk.Frame(panel, bg=BG)
-        actions.pack(fill="x", pady=(14, 8))
-        self._copy_button = FlatButton(
-            actions,
-            "二次复制",
-            self._copy_current,
-            fonts=self.fonts,
-            accent=True,
-            font_size=10,
-            padx=14,
-            pady=8,
-        )
-        self._copy_button.pack(side="left")
-        self._reveal_button = FlatButton(
-            actions,
-            "打开位置",
-            self._reveal_current,
-            fonts=self.fonts,
-            font_size=10,
-            padx=12,
-            pady=8,
-        )
-        self._reveal_button.pack(side="left", padx=(8, 0))
-        self._delete_button = FlatButton(
-            actions,
-            "删除",
-            self._delete_current,
-            fonts=self.fonts,
-            font_size=10,
-            padx=12,
-            pady=8,
-            fg=DANGER,
-        )
-        self._delete_button.pack(side="left", padx=(8, 0))
-
         self._message_var = tk.StringVar(value="")
         self._message_label = tk.Label(
             panel,
@@ -361,7 +328,7 @@ class ClipboardView(tk.Frame):
             anchor="w",
             font=self.fonts.u(9),
         )
-        self._message_label.pack(fill="x", pady=(0, 6))
+        self._message_label.pack(fill="x", pady=(12, 6))
 
         self.detail_scroll = ScrollableFrame(panel, background=BG)
         self.detail_scroll.pack(fill="both", expand=True)
@@ -439,6 +406,7 @@ class ClipboardView(tk.Frame):
             child.destroy()
         self._card_rows.clear()
         self._card_labels.clear()
+        self._card_actions.clear()
 
         if not self._entries:
             empty = tk.Frame(inner, bg=BG)
@@ -494,6 +462,35 @@ class ClipboardView(tk.Frame):
 
         badge = TypeBadge(inner, entry.kind, size=40, fonts=self.fonts)
         badge.pack(side="left", padx=(0, 10))
+
+        kind = (
+            entry.kind.value if hasattr(entry.kind, "value") else str(entry.kind)
+        )
+        action_bar = CardActionBar(
+            inner,
+            {
+                "copy": lambda eid=entry.id: self._copy_by_id(eid),
+                "reveal": lambda eid=entry.id: self._reveal_by_id(eid),
+                "delete": lambda eid=entry.id: self._delete_by_id(eid),
+            },
+            fonts=self.fonts,
+            bg=background,
+            reveal_enabled=kind != "text",
+            reveal_tooltip=(
+                "打开位置" if kind != "text" else "文本记录没有可打开的位置"
+            ),
+        )
+        action_bar.pack(side="right", padx=(8, 0))
+        action_bar.bind(
+            "<Enter>",
+            lambda _e, eid=entry.id: self._card_hover(eid, True),
+            add="+",
+        )
+        action_bar.bind(
+            "<Leave>",
+            lambda _e, eid=entry.id: self._card_hover(eid, False),
+            add="+",
+        )
 
         time_label = tk.Label(
             inner,
@@ -567,18 +564,15 @@ class ClipboardView(tk.Frame):
             )
             widget.bind(
                 "<Enter>",
-                lambda _e, row=row_widgets, eid=entry.id: self._card_hover(
-                    row, eid, True
-                ),
+                lambda _e, eid=entry.id: self._card_hover(eid, True),
             )
             widget.bind(
                 "<Leave>",
-                lambda _e, row=row_widgets, eid=entry.id: self._card_hover(
-                    row, eid, False
-                ),
+                lambda _e, eid=entry.id: self._card_hover(eid, False),
             )
         bind_wheel_recursive(card, self.list_scroll._on_wheel)
         self._card_rows[entry.id] = row_widgets
+        self._card_actions[entry.id] = action_bar
         self._card_labels[entry.id] = {
             "title": title,
             "secondary": secondary,
@@ -608,19 +602,26 @@ class ClipboardView(tk.Frame):
             first = f"{first} 等 {len(entry.paths)} 个文件"
         return middle_ellipsis(first, 70), MUTED
 
-    def _card_hover(
-        self, row: list[tk.Widget], entry_id: int, entering: bool
-    ) -> None:
+    def _apply_card_background(self, entry_id: int, color: str) -> None:
+        for widget in self._card_rows.get(entry_id, []):
+            try:
+                widget.configure(bg=color)
+            except tk.TclError:
+                pass
+        action_bar = self._card_actions.get(entry_id)
+        if action_bar is not None:
+            try:
+                action_bar.set_background(color)
+            except tk.TclError:
+                pass
+
+    def _card_hover(self, entry_id: int, entering: bool) -> None:
         selected = entry_id == self._selected_id
         if entering and not selected:
             color = CARD_HOVER
         else:
             color = ROW_ACTIVE if selected else PANEL_ALT
-        for widget in row:
-            try:
-                widget.configure(bg=color)
-            except tk.TclError:
-                pass
+        self._apply_card_background(entry_id, color)
 
     def _select(self, entry_id: int) -> None:
         if self._selected_id == entry_id:
@@ -631,13 +632,9 @@ class ClipboardView(tk.Frame):
         for card_id in (old, entry_id):
             if card_id is None:
                 continue
-            for widget in self._card_rows.get(card_id, []):
-                try:
-                    widget.configure(
-                        bg=ROW_ACTIVE if card_id == entry_id else PANEL_ALT
-                    )
-                except tk.TclError:
-                    pass
+            self._apply_card_background(
+                card_id, ROW_ACTIVE if card_id == entry_id else PANEL_ALT
+            )
         self._render_detail(self._selected_entry())
 
     # ----------------------------------------------------------------- detail
@@ -697,9 +694,6 @@ class ClipboardView(tk.Frame):
             self._detail_title_var.set("选择一条记录")
             self._detail_meta_var.set("查看内容、路径和复制来源")
             self._detail_time_var.set("")
-            self._copy_button.set_enabled(False)
-            self._reveal_button.set_enabled(False)
-            self._delete_button.set_enabled(False)
             tk.Label(
                 inner,
                 text="从左侧选择一条剪贴板记录",
@@ -724,9 +718,6 @@ class ClipboardView(tk.Frame):
         )
         self._detail_time_var.set(format_time(entry.last_copied_at, detail=True))
         kind = entry.kind.value if hasattr(entry.kind, "value") else str(entry.kind)
-        self._copy_button.set_enabled(True)
-        self._reveal_button.set_enabled(kind != "text")
-        self._delete_button.set_enabled(True)
 
         if kind == "text":
             self._build_text_detail(inner, entry)
@@ -1210,6 +1201,7 @@ class ClipboardView(tk.Frame):
             self._copy_entry(self._current_entry)
 
     def _copy_by_id(self, entry_id: int) -> None:
+        self._flush_text_edit()
         entry = next((item for item in self._entries if item.id == entry_id), None)
         if entry is not None:
             self._copy_entry(entry)
@@ -1263,10 +1255,20 @@ class ClipboardView(tk.Frame):
             return
         self._flash("路径已复制到剪贴板")
 
+    def _reveal_by_id(self, entry_id: int) -> None:
+        self._flush_text_edit()
+        entry = next((item for item in self._entries if item.id == entry_id), None)
+        if entry is not None:
+            self._reveal_entry(entry)
+
     def _reveal_current(self) -> None:
         self._flush_text_edit()
         entry = self._current_entry
-        if entry is None or self.service is None:
+        if entry is not None:
+            self._reveal_entry(entry)
+
+    def _reveal_entry(self, entry: ClipboardEntry) -> None:
+        if self.service is None:
             return
         kind = entry.kind.value if hasattr(entry.kind, "value") else str(entry.kind)
         if kind == "text":
@@ -1314,6 +1316,10 @@ class ClipboardView(tk.Frame):
         if entry is None or self.service is None:
             return
         self._delete_entry(entry.id)
+
+    def _delete_by_id(self, entry_id: int) -> None:
+        self._flush_text_edit()
+        self._delete_entry(entry_id)
 
     def _delete_entry(self, entry_id: int) -> None:
         if self.service is None:
