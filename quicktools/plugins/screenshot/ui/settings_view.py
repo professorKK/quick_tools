@@ -27,6 +27,8 @@ from quicktools.ui_theme import (
 )
 from quicktools.window_frame import WindowFrame
 
+from quicktools.modal_dialogs import open_native_file_dialog
+
 if TYPE_CHECKING:
     from ..plugin import ScreenshotPlugin
 
@@ -355,6 +357,7 @@ class ScreenshotSettingsPanel(tk.Frame):
             description="仅 JPEG 格式使用，数值越高文件越大。",
             bg=CARD_BG,
             fonts=self.fonts,
+            last=True,
         )
         quality_row.pack(fill="x")
         self.quality_var = tk.StringVar(value=str(self.settings.jpeg_quality))
@@ -363,24 +366,6 @@ class ScreenshotSettingsPanel(tk.Frame):
             from_=50,
             to=100,
             textvariable=self.quality_var,
-            width=8,
-        ).pack()
-
-        recent_row = SettingsRow(
-            save_body,
-            "最近截图上限",
-            description="超过上限时自动清理最旧的截图。",
-            bg=CARD_BG,
-            fonts=self.fonts,
-            last=True,
-        )
-        recent_row.pack(fill="x")
-        self.recent_var = tk.StringVar(value=str(self.settings.recent_limit))
-        ttk.Spinbox(
-            recent_row.control,
-            from_=10,
-            to=5000,
-            textvariable=self.recent_var,
             width=8,
         ).pack()
 
@@ -434,6 +419,37 @@ class ScreenshotSettingsPanel(tk.Frame):
             fonts=self.fonts,
             last=True,
         ).pack(fill="x")
+
+        window_card = Card(self)
+        window_card.pack(fill="x", pady=(0, 12))
+        window_body = window_card.body
+        tk.Label(
+            window_body,
+            text="窗口截图（Windows/X11）",
+            bg=CARD_BG,
+            fg=TEXT,
+            anchor="w",
+            font=self.fonts.u(10, "bold"),
+        ).pack(fill="x", pady=(0, 2))
+        margin_row = SettingsRow(
+            window_body,
+            "窗口外扩边距（像素）",
+            description="向所选窗口四周额外扩展的像素数；0 表示严格按窗口边界截图。仅原生窗口截图生效。",
+            bg=CARD_BG,
+            fonts=self.fonts,
+            last=True,
+        )
+        margin_row.pack(fill="x")
+        self.margin_var = tk.StringVar(
+            value=str(self.settings.window_margin_px)
+        )
+        ttk.Spinbox(
+            margin_row.control,
+            from_=0,
+            to=500,
+            textvariable=self.margin_var,
+            width=8,
+        ).pack()
 
         scroll_card = Card(self)
         scroll_card.pack(fill="x", pady=(0, 12))
@@ -545,12 +561,14 @@ class ScreenshotSettingsPanel(tk.Frame):
         ).pack(side="right")
 
     def _browse_dir(self) -> None:
-        selected = filedialog.askdirectory(
-            parent=self.winfo_toplevel(),
+        selected = open_native_file_dialog(
+            self,
+            filedialog.askdirectory,
             title="选择截图保存目录",
             initialdir=self.save_dir_var.get() or None,
         )
         if selected:
+            log.info("用户操作：选择截图保存目录 %s", selected)
             self.save_dir_var.set(selected)
 
     def _record_hotkey(self) -> None:
@@ -594,14 +612,14 @@ class ScreenshotSettingsPanel(tk.Frame):
         )
         try:
             quality = int(self.quality_var.get())
-            recent = int(self.recent_var.get())
+            margin = int(self.margin_var.get())
             scroll_values = {
                 key: int(var.get()) for key, var in self._scroll_vars.items()
             }
         except ValueError:
             messagebox.showerror(
                 "设置错误",
-                "质量、最近截图上限和滚动参数必须是整数。",
+                "质量、外扩边距和滚动参数必须是整数。",
                 parent=self.winfo_toplevel(),
             )
             return
@@ -610,7 +628,7 @@ class ScreenshotSettingsPanel(tk.Frame):
                 save_dir=self.save_dir_var.get().strip(),
                 image_format=format_value,
                 jpeg_quality=quality,
-                recent_limit=recent,
+                window_margin_px=margin,
                 hotkey_enabled=bool(self.hotkey_enabled_var.get()),
                 **scroll_values,
             )

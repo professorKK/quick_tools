@@ -127,6 +127,17 @@ def test_sticker_alpha_is_composited() -> None:
     assert pixel[3] == 255
 
 
+def test_sticker_fills_resized_bounds() -> None:
+    doc = document()
+    sticker = Image.new("RGBA", (20, 20), (0, 200, 0, 255))
+    annotation = doc.add_sticker(sticker, Point(120, 90), Style())
+    annotation.bounds = Rect(100, 80, 80, 20)
+    rendered = doc.render()
+    # The sticker is stretched to the annotation bounds, not letterboxed.
+    assert rendered.getpixel((105, 85))[1] > 150
+    assert rendered.getpixel((175, 95))[1] > 150
+
+
 def test_export_formats() -> None:
     doc = document()
     doc.add_shape(Tool.RECT, Rect(10, 10, 40, 30), Style())

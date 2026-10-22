@@ -1,15 +1,25 @@
-"""SQLite-backed recent screenshot history with cached thumbnails."""
+"""File-backed recent screenshot history.
+
+Screenshots live directly in the configured save directory. Metadata is encoded
+in the file name instead of a database:
+
+    screenshot_<YYYYMMDD>_<HHMMSS>_<mmm>_<mode>[_N]_<W>x<H>[_fav].<ext>
+
+The optional ``_N`` disambiguates files captured in the same millisecond, and
+``_fav`` marks a favorite. Scanning the directory at read time keeps the list
+in sync with the file manager and lets users search favorites by file name.
+"""
 
 from __future__ import annotations
 
 import io
 import logging
 import os
-import sqlite3
+import re
 import tempfile
 import time
-import uuid
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 
 from PIL import Image
@@ -18,6 +28,14 @@ log = logging.getLogger(__name__)
 
 THUMB_MAX_SIDE = 360
 MAX_IMAGE_BYTES = 50 * 1024 * 1024
+_FAV_SUFFIX = "_fav"
+_NAME_RE = re.compile(
+    r"^screenshot_(?P<date>\d{8})_(?P<time>\d{6})_(?P<ms>\d{3})_"
+    r"(?P<mode>[a-z]+)(?:_(?P<index>\d+))?_"
+    r"(?P<width>\d+)x(?P<height>\d+)(?P<fav>_fav)?"
+    r"(?P<ext>\.(?:png|jpg|jpeg|webp))$",
+    re.IGNORECASE,
+)
 
 
 class RecentStoreError(Exception):
@@ -26,95 +44,53 @@ class RecentStoreError(Exception):
 
 @dataclass(frozen=True)
 class RecentEntry:
-    id: int
+    id: str
+    path: Path
     created_at: float
     updated_at: float
     mode: str
     width: int
     height: int
-    png_path: str
-    thumb_path: str
     byte_size: int
-    saved_path: str | None
-    annotation_count: int
-    source: str
     favorite: bool = False
+
+    @property
+    def name(self) -> str:
+        return self.path.name
 
 
 class RecentStore:
-    """Store screenshot originals and thumbnails under the plugin data dir.
+    """Scan the screenshot save directory and manage its image files.
 
-    All methods must be called on the Tk main thread.
+    All methods must be called on the Tk main thread. Thumbnails are cached in
+    ``<data_dir>/thumbs``; the cache is not a database and can be deleted at
+    any time.
     """
 
-    def __init__(self, data_dir: Path) -> None:
+    def __init__(self, data_dir: Path, save_dir: Path | str | None = None) -> None:
         self.data_dir = Path(data_dir)
-        self.images_dir = self.data_dir / "images"
+        self.data_dir.mkdir(parents=True, exist_ok=True)
         self.thumbs_dir = self.data_dir / "thumbs"
-        self.images_dir.mkdir(parents=True, exist_ok=True)
         self.thumbs_dir.mkdir(parents=True, exist_ok=True)
-        self._conn = sqlite3.connect(self.data_dir / "recent.db")
-        self._conn.row_factory = sqlite3.Row
-        self._conn.execute("PRAGMA journal_mode=WAL")
-        self._conn.execute("PRAGMA synchronous=NORMAL")
-        self._conn.executescript(
-            """
-            CREATE TABLE IF NOT EXISTS shots (
-              id INTEGER PRIMARY KEY AUTOINCREMENT,
-              created_at REAL NOT NULL,
-              updated_at REAL NOT NULL,
-              mode TEXT NOT NULL,
-              width INTEGER NOT NULL,
-              height INTEGER NOT NULL,
-              png_path TEXT NOT NULL,
-              thumb_path TEXT NOT NULL,
-              byte_size INTEGER NOT NULL,
-              saved_path TEXT,
-              annotation_count INTEGER NOT NULL DEFAULT 0,
-              source TEXT NOT NULL DEFAULT '',
-              favorite INTEGER NOT NULL DEFAULT 0
-            );
-            CREATE INDEX IF NOT EXISTS idx_shots_updated
-              ON shots(updated_at DESC, id DESC);
-            """
+        self._save_dir = (
+            Path(save_dir) if save_dir is not None else self.data_dir
         )
-        columns = {
-            str(row["name"])
-            for row in self._conn.execute("PRAGMA table_info(shots)").fetchall()
-        }
-        if "favorite" not in columns:
-            self._conn.execute(
-                "ALTER TABLE shots ADD COLUMN "
-                "favorite INTEGER NOT NULL DEFAULT 0"
-            )
-        self._conn.execute(
-            "CREATE INDEX IF NOT EXISTS idx_shots_favorite "
-            "ON shots(favorite, updated_at DESC, id DESC)"
-        )
-        self._conn.execute("PRAGMA user_version=2")
-        self._conn.commit()
+        self._save_dir.mkdir(parents=True, exist_ok=True)
+        self._migrate_legacy_db()
 
     # ------------------------------------------------------------ lifecycle
+    @property
+    def save_dir(self) -> Path:
+        return self._save_dir
+
+    def set_save_dir(self, path: Path | str) -> None:
+        self._save_dir = Path(path)
+        self._save_dir.mkdir(parents=True, exist_ok=True)
+
     def close(self) -> None:
-        try:
-            self._conn.close()
-        except Exception:
-            pass
+        """Kept for API compatibility; the file store has nothing to close."""
 
     # -------------------------------------------------------------- helpers
-    def _safe_path(self, relative: str) -> Path | None:
-        if not relative:
-            return None
-        candidate = Path(relative)
-        if candidate.is_absolute():
-            return None
-        resolved = (self.data_dir / candidate).resolve()
-        try:
-            resolved.relative_to(self.data_dir.resolve())
-        except ValueError:
-            return None
-        return resolved
-
     @staticmethod
     def _normalize_png(png: bytes) -> tuple[bytes, int, int]:
         if not isinstance(png, (bytes, bytearray)) or not png:
@@ -161,224 +137,530 @@ class RecentStore:
                 except OSError:
                     pass
 
-    def _write_thumbnail(self, payload: bytes, path: Path) -> None:
-        try:
-            with Image.open(io.BytesIO(payload)) as image:
-                thumb = image.copy()
-            thumb.thumbnail((THUMB_MAX_SIDE, THUMB_MAX_SIDE), Image.LANCZOS)
-            buffer = io.BytesIO()
-            thumb.save(buffer, format="PNG")
-            self._write_png(path, buffer.getvalue())
-        except Exception:
-            log.exception("生成截图缩略图失败")
-            self._write_png(path, payload)
-
-    def _remove_files(self, entry: RecentEntry) -> None:
-        for relative in (entry.png_path, entry.thumb_path):
-            path = self._safe_path(relative)
-            if path is not None:
-                try:
-                    path.unlink()
-                except FileNotFoundError:
-                    pass
-                except OSError:
-                    log.debug("删除截图文件失败：%s", path, exc_info=True)
-
     @staticmethod
-    def _row_to_entry(row: sqlite3.Row) -> RecentEntry:
-        return RecentEntry(
-            id=int(row["id"]),
-            created_at=float(row["created_at"]),
-            updated_at=float(row["updated_at"]),
-            mode=str(row["mode"]),
-            width=int(row["width"]),
-            height=int(row["height"]),
-            png_path=str(row["png_path"]),
-            thumb_path=str(row["thumb_path"]),
-            byte_size=int(row["byte_size"]),
-            saved_path=row["saved_path"],
-            annotation_count=int(row["annotation_count"]),
-            source=str(row["source"] or ""),
-            favorite=bool(row["favorite"]),
+    def _timestamp_parts(stamp: float) -> tuple[str, str, str]:
+        moment = datetime.fromtimestamp(float(stamp))
+        return (
+            moment.strftime("%Y%m%d"),
+            moment.strftime("%H%M%S"),
+            f"{moment.microsecond // 1000:03d}",
         )
 
-    # --------------------------------------------------------------- mutate
-    def add_png(self, png: bytes, *, mode: str, source: str = "") -> RecentEntry:
-        payload, width, height = self._normalize_png(png)
-        name = uuid.uuid4().hex
-        png_relative = f"images/{name}.png"
-        thumb_relative = f"thumbs/{name}.png"
-        png_path = self._safe_path(png_relative)
-        thumb_path = self._safe_path(thumb_relative)
-        if png_path is None or thumb_path is None:
-            raise RecentStoreError("截图存储路径无效")
-        self._write_png(png_path, payload)
-        self._write_thumbnail(payload, thumb_path)
-        now = time.time()
+    @staticmethod
+    def _make_name(
+        date: str,
+        clock: str,
+        millis: str,
+        mode: str,
+        width: int,
+        height: int,
+        *,
+        index: int = 0,
+        favorite: bool = False,
+        extension: str = ".png",
+    ) -> str:
+        stem = f"screenshot_{date}_{clock}_{millis}_{mode}"
+        if index > 0:
+            stem += f"_{index}"
+        stem += f"_{width}x{height}"
+        if favorite:
+            stem += _FAV_SUFFIX
+        return f"{stem}{extension}"
+
+    @staticmethod
+    def _entry_id(
+        date: str, clock: str, millis: str, mode: str, index: int = 0
+    ) -> str:
+        value = f"{date}_{clock}_{millis}_{mode}"
+        return f"{value}_{index}" if index > 0 else value
+
+    def _entry_from_path(self, path: Path) -> RecentEntry | None:
+        match = _NAME_RE.match(path.name)
+        if match is None:
+            return None
         try:
-            cursor = self._conn.execute(
-                """
-                INSERT INTO shots (
-                  created_at, updated_at, mode, width, height,
-                  png_path, thumb_path, byte_size, saved_path,
-                  annotation_count, source
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, 0, ?)
-                """,
-                (
-                    now,
-                    now,
-                    mode,
-                    width,
-                    height,
-                    png_relative,
-                    thumb_relative,
-                    len(payload),
-                    source,
-                ),
+            stamp = datetime.strptime(
+                f"{match.group('date')}_{match.group('time')}_"
+                f"{match.group('ms')}",
+                "%Y%m%d_%H%M%S_%f",
+            ).timestamp()
+            stat = path.stat()
+        except (ValueError, OSError):
+            return None
+        if not path.is_file():
+            return None
+        index = int(match.group("index") or 0)
+        return RecentEntry(
+            id=self._entry_id(
+                match.group("date"),
+                match.group("time"),
+                match.group("ms"),
+                match.group("mode").lower(),
+                index,
+            ),
+            path=path,
+            created_at=stamp,
+            updated_at=max(stamp, float(stat.st_mtime)),
+            mode=match.group("mode").lower(),
+            width=int(match.group("width")),
+            height=int(match.group("height")),
+            byte_size=int(stat.st_size),
+            favorite=bool(match.group("fav")),
+        )
+
+    def _scan(self) -> list[RecentEntry]:
+        try:
+            files = list(self._save_dir.iterdir())
+        except OSError:
+            log.exception("最近截图：扫描保存目录失败 %s", self._save_dir)
+            return []
+        by_id: dict[str, RecentEntry] = {}
+        for path in files:
+            if not path.is_file():
+                continue
+            entry = self._entry_from_path(path)
+            if entry is None:
+                continue
+            previous = by_id.get(entry.id)
+            if previous is None or entry.updated_at > previous.updated_at:
+                if previous is not None:
+                    log.warning(
+                        "最近截图：文件 id=%s 重复，使用较新的 %s（忽略 %s）",
+                        entry.id,
+                        entry.path.name,
+                        previous.path.name,
+                    )
+                by_id[entry.id] = entry
+            else:
+                log.warning(
+                    "最近截图：文件 id=%s 重复，保留 %s（忽略 %s）",
+                    entry.id,
+                    previous.path.name,
+                    entry.path.name,
+                )
+        return sorted(
+            by_id.values(),
+            key=lambda item: (item.updated_at, item.created_at, item.id),
+            reverse=True,
+        )
+
+    def _unique_target(
+        self,
+        date: str,
+        clock: str,
+        millis: str,
+        mode: str,
+        width: int,
+        height: int,
+        *,
+        favorite: bool = False,
+        extension: str = ".png",
+    ) -> tuple[str, Path]:
+        index = 0
+        while True:
+            name = self._make_name(
+                date,
+                clock,
+                millis,
+                mode,
+                width,
+                height,
+                index=index,
+                favorite=favorite,
+                extension=extension,
             )
-            self._conn.commit()
-        except Exception:
-            self._conn.rollback()
-            for path in (png_path, thumb_path):
-                try:
-                    path.unlink()
-                except OSError:
-                    pass
-            raise
-        entry = self.get(int(cursor.lastrowid))
+            path = self._save_dir / name
+            if not path.exists():
+                entry_id = self._entry_id(
+                    date, clock, millis, mode, index
+                )
+                return entry_id, path
+            index += 1
+
+    def _thumb_cache_path(self, entry_id: str) -> Path:
+        safe = re.sub(r"[^0-9a-zA-Z_.-]", "_", entry_id)
+        return self.thumbs_dir / f"{safe}.png"
+
+    # --------------------------------------------------------------- mutate
+    def add_png(
+        self, png: bytes, *, mode: str, source: str = ""
+    ) -> RecentEntry:
+        payload, width, height = self._normalize_png(png)
+        date, clock, millis = self._timestamp_parts(time.time())
+        clean_mode = re.sub(r"[^a-z]", "", (mode or "region").lower())
+        if not clean_mode:
+            clean_mode = "region"
+        _entry_id, target = self._unique_target(
+            date, clock, millis, clean_mode, width, height
+        )
+        self._write_png(target, payload)
+        entry = self._entry_from_path(target)
         if entry is None:
-            raise RecentStoreError("无法读取新建的截图记录")
+            raise RecentStoreError("无法读取新建的截图文件")
+        log.debug(
+            "最近截图：新增文件 id=%s，模式=%s，尺寸=%d×%d，%d 字节，文件=%s",
+            entry.id,
+            entry.mode,
+            entry.width,
+            entry.height,
+            entry.byte_size,
+            entry.path,
+        )
         return entry
 
     def update_png(
-        self, entry_id: int, png: bytes, *, annotation_count: int = 0
+        self, entry_id: str, png: bytes, *, annotation_count: int = 0
     ) -> RecentEntry | None:
         entry = self.get(entry_id)
         if entry is None:
             return None
         payload, width, height = self._normalize_png(png)
-        png_path = self._safe_path(entry.png_path)
-        thumb_path = self._safe_path(entry.thumb_path)
-        if png_path is None or thumb_path is None:
-            raise RecentStoreError("截图存储路径无效")
-        self._write_png(png_path, payload)
-        self._write_thumbnail(payload, thumb_path)
-        self._conn.execute(
-            """
-            UPDATE shots SET updated_at = ?, width = ?, height = ?,
-              byte_size = ?, annotation_count = ?
-            WHERE id = ?
-            """,
-            (
-                time.time(),
-                width,
-                height,
-                len(payload),
-                max(0, int(annotation_count)),
-                entry_id,
-            ),
+        new_name = re.sub(
+            r"_\d+x\d+(?=_fav|\.)",
+            f"_{width}x{height}",
+            entry.name,
+            count=1,
         )
-        self._conn.commit()
-        return self.get(entry_id)
-
-    def mark_saved(self, entry_id: int, path: Path) -> None:
-        self._conn.execute(
-            "UPDATE shots SET saved_path = ?, updated_at = ? WHERE id = ?",
-            (str(path), time.time(), entry_id),
+        if not new_name.lower().endswith(".png"):
+            # Managed screenshots are always rewritten as lossless PNG.
+            new_name = Path(new_name).with_suffix(".png").name
+        target = entry.path.with_name(new_name)
+        old_path = entry.path
+        if target != old_path and target.exists():
+            log.warning(
+                "最近截图：更新时目标文件已存在，保留原文件名 %s", target
+            )
+            target = old_path
+        self._write_png(target, payload)
+        if target != old_path:
+            try:
+                old_path.unlink()
+            except FileNotFoundError:
+                pass
+            except OSError:
+                log.warning(
+                    "最近截图：删除旧尺寸文件失败 %s", old_path, exc_info=True
+                )
+        try:
+            self._thumb_cache_path(entry_id).unlink()
+        except FileNotFoundError:
+            pass
+        except OSError:
+            log.debug("最近截图：删除缩略图缓存失败", exc_info=True)
+        updated = self.get(entry_id)
+        log.debug(
+            "最近截图：更新文件 id=%s，尺寸=%d×%d，%d 字节",
+            entry_id,
+            width,
+            height,
+            len(payload),
         )
-        self._conn.commit()
+        return updated
 
     def set_favorite(
-        self, entry_id: int, favorite: bool
+        self, entry_id: str, favorite: bool
     ) -> RecentEntry | None:
-        """Set the favorite flag without changing the sort timestamp."""
-
-        self._conn.execute(
-            "UPDATE shots SET favorite = ? WHERE id = ?",
-            (1 if favorite else 0, int(entry_id)),
+        entry = self.get(entry_id)
+        if entry is None:
+            return None
+        stem = entry.path.stem
+        if favorite and not stem.endswith(_FAV_SUFFIX):
+            new_stem = stem + _FAV_SUFFIX
+        elif not favorite and stem.endswith(_FAV_SUFFIX):
+            new_stem = stem[: -len(_FAV_SUFFIX)]
+        else:
+            return entry
+        target = entry.path.with_name(new_stem + entry.path.suffix)
+        if target.exists():
+            log.warning(
+                "最近截图：收藏改名失败，目标已存在 id=%s path=%s",
+                entry_id,
+                target,
+            )
+            return None
+        try:
+            entry.path.rename(target)
+        except OSError:
+            log.exception("最近截图：收藏改名失败 id=%s", entry_id)
+            return None
+        log.debug(
+            "最近截图：文件 id=%s 收藏状态=%s，文件=%s",
+            entry_id,
+            favorite,
+            target.name,
         )
-        self._conn.commit()
         return self.get(entry_id)
 
-    def toggle_favorite(self, entry_id: int) -> RecentEntry | None:
+    def toggle_favorite(self, entry_id: str) -> RecentEntry | None:
         entry = self.get(entry_id)
         if entry is None:
             return None
         return self.set_favorite(entry.id, not entry.favorite)
 
-    def delete(self, entry_id: int) -> bool:
+    def delete(self, entry_id: str) -> bool:
         entry = self.get(entry_id)
         if entry is None:
             return False
-        self._conn.execute("DELETE FROM shots WHERE id = ?", (entry_id,))
-        self._conn.commit()
-        self._remove_files(entry)
+        try:
+            entry.path.unlink()
+        except FileNotFoundError:
+            return False
+        except OSError:
+            log.exception("最近截图：删除文件失败 %s", entry.path)
+            return False
+        try:
+            self._thumb_cache_path(entry_id).unlink()
+        except FileNotFoundError:
+            pass
+        except OSError:
+            log.debug("最近截图：删除缩略图缓存失败", exc_info=True)
+        log.debug("最近截图：已删除文件 id=%s %s", entry_id, entry.path)
         return True
 
     def clear(self) -> int:
-        rows = self.list(limit=100000)
-        self._conn.execute("DELETE FROM shots")
-        self._conn.commit()
-        for entry in rows:
-            self._remove_files(entry)
-        return len(rows)
+        entries = self._scan()
+        removed = 0
+        for entry in entries:
+            if self.delete(entry.id):
+                removed += 1
+        log.debug("最近截图：清空 %d 个文件", removed)
+        return removed
 
     def prune(self, *, max_entries: int, max_bytes: int) -> int:
-        removed = 0
-        rows = self.list(limit=100000)
-        keep_count = max(1, int(max_entries))
-        for entry in rows[keep_count:]:
-            if self.delete(entry.id):
-                removed += 1
-        rows = self.list(limit=100000)
-        total = sum(entry.byte_size for entry in rows)
-        for entry in reversed(rows):
-            if total <= max_bytes:
-                break
-            if self.delete(entry.id):
-                removed += 1
-                total -= entry.byte_size
-        return removed
+        """No-op: managed files are the user's data and are never auto-deleted."""
+        return 0
 
     # --------------------------------------------------------------- query
     def list(
         self,
-        limit: int = 100,
+        limit: int | None = 100,
         *,
         favorite: bool | None = None,
         mode: str | None = None,
     ) -> list[RecentEntry]:
-        clauses: list[str] = []
-        params: list[object] = []
+        entries = self._scan()
         if favorite is not None:
-            clauses.append("favorite = ?")
-            params.append(1 if favorite else 0)
+            entries = [item for item in entries if item.favorite is favorite]
         if mode:
-            clauses.append("mode = ?")
-            params.append(mode.strip().lower())
-        where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
-        params.append(max(1, int(limit)))
-        rows = self._conn.execute(
-            f"""
-            SELECT * FROM shots
-            {where}
-            ORDER BY updated_at DESC, id DESC
-            LIMIT ?
-            """,
-            params,
-        ).fetchall()
-        return [self._row_to_entry(row) for row in rows]
+            normalized = mode.strip().lower()
+            entries = [item for item in entries if item.mode == normalized]
+        if limit is not None:
+            entries = entries[: max(1, int(limit))]
+        return entries
 
-    def get(self, entry_id: int) -> RecentEntry | None:
-        row = self._conn.execute(
-            "SELECT * FROM shots WHERE id = ?", (int(entry_id),)
-        ).fetchone()
-        return self._row_to_entry(row) if row is not None else None
+    def get(self, entry_id: str) -> RecentEntry | None:
+        if not entry_id:
+            return None
+        for entry in self._scan():
+            if entry.id == entry_id:
+                return entry
+        return None
 
     def image_path(self, entry: RecentEntry) -> Path | None:
-        path = self._safe_path(entry.png_path)
-        return path if path is not None and path.exists() else None
+        path = entry.path
+        return path if path.exists() else None
 
     def thumb_path(self, entry: RecentEntry) -> Path | None:
-        path = self._safe_path(entry.thumb_path)
-        return path if path is not None and path.exists() else None
+        source = self.image_path(entry)
+        if source is None:
+            return None
+        cache = self._thumb_cache_path(entry.id)
+        try:
+            if cache.exists() and cache.stat().st_mtime >= source.stat().st_mtime:
+                return cache
+            with Image.open(source) as image:
+                thumb = image.copy()
+            thumb.thumbnail((THUMB_MAX_SIDE, THUMB_MAX_SIDE), Image.LANCZOS)
+            buffer = io.BytesIO()
+            thumb.save(buffer, format="PNG")
+            self._write_png(cache, buffer.getvalue())
+            return cache
+        except Exception:
+            log.warning(
+                "最近截图：生成缩略图失败 id=%s 文件=%s",
+                entry.id,
+                source,
+                exc_info=True,
+            )
+            return None
+
+    # ------------------------------------------------------------ migration
+    def _migrate_legacy_db(self) -> None:
+        database = self.data_dir / "recent.db"
+        marker = self.data_dir / "recent.db.migrated"
+        if not database.exists() or marker.exists():
+            return
+        import sqlite3
+
+        migrated = 0
+        skipped = 0
+        log.info("最近截图：开始迁移旧数据库 %s", database)
+        try:
+            connection = sqlite3.connect(
+                f"file:{database}?mode=ro", uri=True
+            )
+            connection.row_factory = sqlite3.Row
+        except Exception:
+            log.exception("最近截图：打开旧数据库失败，跳过迁移")
+            return
+        try:
+            columns = {
+                str(row["name"])
+                for row in connection.execute(
+                    "PRAGMA table_info(shots)"
+                ).fetchall()
+            }
+            if not columns:
+                log.warning("最近截图：旧数据库没有 shots 表，跳过迁移")
+                marker.write_text("no-shots-table\n", encoding="utf-8")
+                return
+            rows = connection.execute(
+                "SELECT * FROM shots ORDER BY id"
+            ).fetchall()
+            for row in rows:
+                data = {key: row[key] for key in row.keys()}
+                relative = str(data.get("png_path") or "")
+                source = self._safe_legacy_path(relative)
+                saved_raw = str(data.get("saved_path") or "").strip()
+                saved_path = (
+                    Path(saved_raw).expanduser() if saved_raw else None
+                )
+                if source is None or not source.exists():
+                    if saved_path is not None and saved_path.is_file():
+                        log.info(
+                            "最近截图迁移：旧缓存缺失，改用已保存文件 %s",
+                            saved_path,
+                        )
+                        source = saved_path
+                    else:
+                        skipped += 1
+                        log.warning(
+                            "最近截图迁移：图片不存在，跳过 id=%s path=%s",
+                            data.get("id"),
+                            relative,
+                        )
+                        continue
+                try:
+                    payload = source.read_bytes()
+                    payload, width, height = self._normalize_png(payload)
+                except Exception:
+                    skipped += 1
+                    log.warning(
+                        "最近截图迁移：图片无效，跳过 id=%s path=%s",
+                        data.get("id"),
+                        source,
+                        exc_info=True,
+                    )
+                    continue
+                stamp = self._legacy_timestamp(data, source)
+                date, clock, millis = self._timestamp_parts(stamp)
+                mode = re.sub(
+                    r"[^a-z]", "", str(data.get("mode") or "region").lower()
+                ) or "region"
+                favorite = bool(data.get("favorite") or 0)
+                _entry_id, target = self._unique_target(
+                    date,
+                    clock,
+                    millis,
+                    mode,
+                    width,
+                    height,
+                    favorite=favorite,
+                )
+                try:
+                    self._write_png(target, payload)
+                    updated_stamp = float(
+                        data.get("updated_at")
+                        or data.get("created_at")
+                        or stamp
+                    )
+                    os.utime(target, (updated_stamp, updated_stamp))
+                except Exception:
+                    skipped += 1
+                    log.warning(
+                        "最近截图迁移：写入文件失败 %s", target, exc_info=True
+                    )
+                    continue
+                migrated += 1
+                log.info(
+                    "最近截图迁移：id=%s -> %s（收藏=%s）",
+                    data.get("id"),
+                    target.name,
+                    favorite,
+                )
+                if saved_path is not None:
+                    self._consume_legacy_export(saved_path, target)
+        except Exception:
+            log.exception("最近截图：迁移旧数据库失败")
+            return
+        finally:
+            try:
+                connection.close()
+            except Exception:
+                pass
+        try:
+            marker.write_text(
+                f"migrated={migrated} skipped={skipped}\n",
+                encoding="utf-8",
+            )
+        except OSError:
+            log.warning("最近截图：写入迁移标记失败 %s", marker, exc_info=True)
+        log.info(
+            "最近截图：旧数据库迁移完成，导入 %d 条，跳过 %d 条",
+            migrated,
+            skipped,
+        )
+
+    def _consume_legacy_export(
+        self, saved_path: Path, managed_target: Path
+    ) -> None:
+        """Remove the old auto-export file that duplicated a migrated entry.
+
+        Only files inside the current save directory whose names match the old
+        automatic ``screenshot_<timestamp>`` pattern are touched. User-renamed
+        files and exports from other directories are kept.
+        """
+        try:
+            resolved = saved_path.resolve()
+            resolved.relative_to(self._save_dir.resolve())
+        except (OSError, ValueError):
+            return
+        if resolved == managed_target.resolve():
+            return
+        if not resolved.is_file():
+            return
+        if not re.match(
+            r"^screenshot_\d{8}_\d{6}(?:_\d+)?\.(?:png|jpg|jpeg|webp)$",
+            resolved.name,
+            re.IGNORECASE,
+        ):
+            return
+        try:
+            resolved.unlink()
+            log.info("最近截图迁移：已合并旧导出文件 %s", resolved)
+        except FileNotFoundError:
+            pass
+        except OSError:
+            log.warning(
+                "最近截图迁移：删除旧导出文件失败 %s", resolved, exc_info=True
+            )
+
+    def _safe_legacy_path(self, relative: str) -> Path | None:
+        if not relative:
+            return None
+        candidate = Path(relative)
+        if candidate.is_absolute():
+            return None
+        resolved = (self.data_dir / candidate).resolve()
+        try:
+            resolved.relative_to(self.data_dir.resolve())
+        except ValueError:
+            return None
+        return resolved
+
+    @staticmethod
+    def _legacy_timestamp(data: dict, source: Path) -> float:
+        try:
+            return float(data.get("created_at") or source.stat().st_mtime)
+        except (TypeError, ValueError, OSError):
+            return time.time()

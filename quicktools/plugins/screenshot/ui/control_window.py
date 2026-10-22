@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import logging
 import tkinter as tk
+from tkinter import filedialog
 from typing import TYPE_CHECKING
 
+from quicktools.modal_dialogs import open_native_file_dialog
 from quicktools.ui_theme import (
     ACCENT,
     BG,
@@ -23,6 +26,10 @@ from .widgets import NavItem, bind_click_recursive
 
 if TYPE_CHECKING:
     from ..plugin import ScreenshotPlugin
+
+log = logging.getLogger(__name__)
+
+_PAGE_NAMES = {"home": "首页", "about": "关于", "settings": "设置"}
 
 
 class ControlWindow(tk.Frame):
@@ -94,6 +101,15 @@ class ControlWindow(tk.Frame):
             active=True,
         )
         home.pack(fill="x", pady=(0, 4))
+        import_images = NavItem(
+            self.sidebar,
+            "导入图片",
+            "open",
+            self.icons,
+            self.fonts,
+            self._import_images,
+        )
+        import_images.pack(fill="x", pady=(0, 4))
         about = NavItem(
             self.sidebar,
             "关于",
@@ -195,6 +211,11 @@ class ControlWindow(tk.Frame):
         page = self.pages.get(name)
         if page is None:
             return
+        if getattr(self, "current_page", None) != name:
+            log.info(
+                "用户操作：截图助手切换到%s页",
+                _PAGE_NAMES.get(name, name),
+            )
         page.tkraise()
         if self._toast_label is not None:
             self._toast_label.lift()
@@ -221,6 +242,7 @@ class ControlWindow(tk.Frame):
             home.refresh_hotkeys()
 
     def on_show(self) -> None:
+        log.info("截图助手：窗口显示/刷新")
         self.refresh_settings()
         view = getattr(self, "recent_view", None)
         if view is not None:
@@ -229,6 +251,10 @@ class ControlWindow(tk.Frame):
 
     # ---------------------------------------------------------------- toast
     def show_toast(self, message: str, error: bool = False) -> None:
+        if error:
+            log.warning("截图助手提示：%s", message)
+        else:
+            log.info("截图助手提示：%s", message)
         if self._toast_job is not None:
             try:
                 self.after_cancel(self._toast_job)
@@ -284,10 +310,51 @@ class ControlWindow(tk.Frame):
             self._toast_job = None
 
     # -------------------------------------------------------------- actions
+    def _import_images(self) -> None:
+        log.info("用户操作：选择要导入编辑的图片")
+        paths = open_native_file_dialog(
+            self,
+            filedialog.askopenfilenames,
+            title="选择要编辑的图片",
+            filetypes=[
+                (
+                    "图片文件",
+                    "*.png *.jpg *.jpeg *.bmp *.gif *.webp *.tif *.tiff",
+                ),
+                ("所有文件", "*.*"),
+            ],
+        )
+        if isinstance(paths, str):
+            paths = [paths] if paths else []
+        else:
+            paths = list(paths or ())
+        if not paths:
+            log.info("用户取消导入图片")
+            return
+        log.info("用户操作：导入 %d 张图片", len(paths))
+        try:
+            entries = self.plugin.import_images(paths)
+        except Exception as exc:
+            log.exception("导入图片失败")
+            self.show_toast(f"导入图片失败：{exc}", error=True)
+            return
+        if entries:
+            self.show_toast(
+                f"已导入 {len(entries)} 张图片，正在打开编辑器"
+            )
+        else:
+            self.show_toast(
+                self.plugin.status_text() or "没有导入图片", error=True
+            )
+
     def _open_settings(self) -> None:
+        log.info("用户操作：打开截图插件设置")
         opener = getattr(self.plugin, "open_settings", None)
         if callable(opener):
             opener(self.winfo_toplevel())
+        else:
+            log.warning("打开截图插件设置失败：插件未提供 open_settings")
 
     def set_status(self, message: str) -> None:
+        log.info("截图助手状态：%s", message)
         self.status_var.set(message)

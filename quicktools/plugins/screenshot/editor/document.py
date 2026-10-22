@@ -449,6 +449,43 @@ class AnnotationDocument:
             self.selected_id = None
         return True
 
+    def rotate_sticker(self, clockwise: bool = True) -> bool:
+        selected = self.selected()
+        if (
+            selected is None
+            or selected.tool is not Tool.STICKER
+            or selected.image is None
+        ):
+            return False
+        bounds = selected.bounds
+        self._push_undo()
+        selected.image = selected.image.convert("RGBA").rotate(
+            -90 if clockwise else 90, expand=True
+        )
+        center = bounds.center
+        width, height = bounds.height, bounds.width
+        selected.bounds = Rect(
+            int(round(center.x - width / 2)),
+            int(round(center.y - height / 2)),
+            width,
+            height,
+        )
+        return True
+
+    def flip_sticker(self, horizontal: bool = True) -> bool:
+        selected = self.selected()
+        if (
+            selected is None
+            or selected.tool is not Tool.STICKER
+            or selected.image is None
+        ):
+            return False
+        self._push_undo()
+        selected.image = selected.image.transpose(
+            Image.FLIP_LEFT_RIGHT if horizontal else Image.FLIP_TOP_BOTTOM
+        )
+        return True
+
     def rotate(self, clockwise: bool = True) -> None:
         old_width, old_height = self.base.size
 

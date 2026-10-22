@@ -249,8 +249,16 @@ class ScreenshotPlugin(PluginBase):
             self.start_service()
         return self.service
 
+    def import_images(self, paths: list[str]):
+        """Import local images into the recent library and open the editor."""
+        service = self._ensure_service()
+        if service is None:
+            raise RuntimeError(self._startup_error or "截图服务未启动")
+        return service.import_images(paths)
+
     # --------------------------------------------------------------- actions
     def handle_action(self, action: str) -> None:
+        log.info("用户操作：截图插件动作 %s", action)
         if action not in self.ACTIONS:
             log.warning("截图插件忽略未知动作：%s", action)
             return
@@ -298,14 +306,17 @@ class ScreenshotPlugin(PluginBase):
                         return
             except tk.TclError:
                 pass
-        log.info("截图状态：%s", message)
+        if self._is_error_status(message):
+            log.warning("截图状态：%s", message)
+        else:
+            log.info("截图状态：%s", message)
         if self._is_error_status(message):
             try:
                 from tkinter import messagebox
 
                 messagebox.showerror("截图", message, parent=None)
             except Exception:
-                pass
+                log.debug("显示截图错误对话框失败", exc_info=True)
 
     @staticmethod
     def _is_error_status(message: str) -> bool:
@@ -347,9 +358,11 @@ class ScreenshotPlugin(PluginBase):
         from quicktools.ui_theme import open_in_file_manager
 
         path = self.settings.resolved_save_dir()
+        log.info("用户操作：打开截图保存目录 %s", path)
         try:
             open_in_file_manager(path)
         except Exception as exc:
+            log.exception("打开截图保存目录失败：%s", path)
             self.set_status(f"无法打开保存目录：{exc}")
             return
         self.set_status(f"已打开保存目录：{path}")

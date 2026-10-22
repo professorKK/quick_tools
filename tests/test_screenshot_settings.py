@@ -16,6 +16,7 @@ from quicktools.plugins.screenshot.settings import (
 def test_defaults_and_hotkey() -> None:
     settings = ScreenshotSettings()
     assert settings.image_format == "png"
+    assert settings.window_margin_px == 0
     assert settings.hotkey.display() == "Ctrl+Alt+X"
     assert settings.resolved_save_dir() == default_save_dir()
 
@@ -34,6 +35,7 @@ def test_normalized_clamps_values() -> None:
         scroll_max_height=1,
         scroll_ignore_top=-5,
         scroll_ignore_bottom=-7,
+        window_margin_px=-10,
     ).normalized()
     assert settings.image_format == "png"
     assert settings.jpeg_quality == 100
@@ -47,6 +49,11 @@ def test_normalized_clamps_values() -> None:
     assert settings.scroll_max_height == 1000
     assert settings.scroll_ignore_top == 0
     assert settings.scroll_ignore_bottom == 0
+    assert settings.window_margin_px == 0
+    assert (
+        ScreenshotSettings(window_margin_px=9999).normalized().window_margin_px
+        == 500
+    )
 
 
 def test_roundtrip_and_corruption(tmp_path: Path) -> None:
@@ -56,10 +63,12 @@ def test_roundtrip_and_corruption(tmp_path: Path) -> None:
         image_format="jpeg",
         jpeg_quality=80,
         recent_limit=42,
+        window_margin_px=37,
     )
     saved = save_settings(tmp_path, settings)
     loaded = load_settings(tmp_path)
     assert loaded == saved
+    assert loaded.window_margin_px == 37
     assert loaded.hotkey.display() == "Ctrl+Shift+A"
 
     path = settings_path(tmp_path)

@@ -33,6 +33,8 @@ from .store import ClipboardStore
 
 log = logging.getLogger(__name__)
 
+MAINTENANCE_INTERVAL_SECONDS = 60.0
+
 Listener = Callable[[str, int | None], None]
 
 
@@ -70,6 +72,7 @@ class ClipboardService:
         # paths. Ignore that narrow text-only echo for a short while.
         self._recent_file_texts: set[str] = set()
         self._recent_file_until = 0.0
+        self._last_maintenance = 0.0
 
     # ------------------------------------------------------------ lifecycle
     def start(self) -> None:
@@ -194,6 +197,15 @@ class ClipboardService:
                 self.last_error = "记录剪贴板内容失败，详见日志"
                 log.exception("记录剪贴板内容失败")
                 self._notify("error", None)
+        # Keep cleaning orphan files while the app sits in the background.
+        # The service throttles this to once per minute; only rows whose
+        # original image disappeared affect the visible list.
+        try:
+            stats = self.maintenance()
+            if stats.missing_images:
+                self._notify("settings", None)
+        except Exception:
+            log.exception("剪贴板定期维护失败")
         self._schedule_drain()
 
     # -------------------------------------------------------------- queries
@@ -203,11 +215,38 @@ class ClipboardService:
         query: str = "",
         *,
         newest_first: bool = True,
+        limit: int | None = None,
+        offset: int = 0,
     ) -> list[ClipboardEntry]:
-        return self.store.list_entries(kind, query, newest_first=newest_first)
+        return self.store.list_entries(
+            kind,
+            query,
+            newest_first=newest_first,
+            limit=limit,
+            offset=offset,
+        )
 
     def counts(self) -> dict[str, int]:
         return self.store.counts()
+
+    def maintenance(self, *, force: bool = False):
+        """Run file cleanup, throttled unless ``force`` is true."""
+        now = time.monotonic()
+        if (
+            not force
+            and self._last_maintenance
+            and now - self._last_maintenance
+            < MAINTENANCE_INTERVAL_SECONDS
+        ):
+            from .store import MaintenanceStats
+
+            return MaintenanceStats()
+        self._last_maintenance = now
+        return self.store.maintenance()
+
+    def sweep_missing_images(self) -> int:
+        """Remove image history rows whose original file no longer exists."""
+        return self.store.remove_missing_images()
 
     def get(self, entry_id: int) -> ClipboardEntry | None:
         return self.store.get(entry_id)

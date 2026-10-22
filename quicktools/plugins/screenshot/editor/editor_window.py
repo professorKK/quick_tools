@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import tkinter as tk
+from dataclasses import dataclass
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 from typing import Callable
@@ -17,6 +18,7 @@ from quicktools.ui_theme import (
     BORDER,
     BUTTON,
     DANGER,
+    DISABLED_TEXT,
     FlatButton,
     MUTED,
     ON_ACCENT,
@@ -28,6 +30,11 @@ from quicktools.ui_theme import (
 )
 from quicktools.window_frame import WindowFrame
 
+from quicktools.modal_dialogs import (
+    open_native_file_dialog,
+    run_modal_dialog,
+)
+
 from ..settings import ScreenshotSettings
 from ..ui.icons import IconSet
 from .annotations import Style, Tool
@@ -38,13 +45,37 @@ from .toolbar import AnnotationToolbar
 
 log = logging.getLogger(__name__)
 
+
+@dataclass(frozen=True)
+class NavigationTarget:
+    image: Image.Image
+    entry_id: str
+    has_newer: bool
+    has_older: bool
+
+
 CopyHandler = Callable[[Image.Image], None]
 SaveHandler = Callable[[Image.Image, Path | None], Path]
-AutoSaveHandler = Callable[[Image.Image], None]
+AutoSaveHandler = Callable[[Image.Image], bool | None]
 CloseHandler = Callable[[bool], None]
 ReturnHandler = Callable[[bool], None]
+NavigateHandler = Callable[[int], NavigationTarget | None]
 
 AUTOSAVE_DELAY_MS = 400
+NAV_EDGE_ZONE_PX = 96
+NAV_INSET_PX = 14
+NAV_ARROW_SIZE = 22
+NAV_IDLE_BG = "#f1efea"
+NAV_HOVER_BG = "#ffffff"
+NAV_PRESS_BG = "#b8b3aa"
+
+
+def _is_descendant_or_self(widget, ancestor) -> bool:
+    while widget is not None:
+        if widget is ancestor:
+            return True
+        widget = getattr(widget, "master", None)
+    return False
 
 
 class CaptureEditor(tk.Toplevel):
@@ -59,6 +90,9 @@ class CaptureEditor(tk.Toplevel):
         on_close: CloseHandler,
         on_return: ReturnHandler | None = None,
         on_autosave: AutoSaveHandler | None = None,
+        on_navigate: NavigateHandler | None = None,
+        nav_has_newer: bool = False,
+        nav_has_older: bool = False,
         initial_tool: Tool | None = None,
     ) -> None:
         super().__init__(root)
@@ -67,8 +101,15 @@ class CaptureEditor(tk.Toplevel):
         self.on_copy = on_copy
         self.on_save = on_save
         self.on_autosave = on_autosave
+        self.on_navigate = on_navigate
         self.on_close = on_close
         self.on_return = on_return
+        self._nav_has_newer = bool(nav_has_newer)
+        self._nav_has_older = bool(nav_has_older)
+        self._nav_buttons: dict[int, FlatButton] = {}
+        self._nav_visible = {-1: False, 1: False}
+        self._nav_check_job: str | None = None
+        self._navigating = False
         self.fonts = pick_fonts(self)
         self.icons = IconSet(self)
         self.font_resolver = FontResolver()
@@ -89,6 +130,13 @@ class CaptureEditor(tk.Toplevel):
         self._toast_job: str | None = None
         self._copy_flash_job: str | None = None
         self._autosave_job: str | None = None
+        log.info(
+            "编辑器：创建编辑窗口，图片=%d×%d，可切换：更新=%s 更早=%s",
+            self.image.width,
+            self.image.height,
+            self._nav_has_newer,
+            self._nav_has_older,
+        )
 
         self.title("截图 · 快捷工具")
         self.configure(bg=BG)
@@ -256,6 +304,7 @@ class CaptureEditor(tk.Toplevel):
             on_zoom=self._on_zoom,
         )
         self._canvas.pack(fill="both", expand=True, padx=1, pady=1)
+        self._build_nav_arrows()
         self.toolbar = AnnotationToolbar(
             shell, self._canvas, self.fonts, icons=self.icons
         )
@@ -338,6 +387,130 @@ class CaptureEditor(tk.Toplevel):
         )
         self._copy_button.pack(side="right", padx=(0, 8))
 
+    # ------------------------------------------------------------- navigation
+    def _build_nav_arrows(self) -> None:
+        if self.on_navigate is None:
+            return
+        canvas = self._canvas.canvas
+        for side, icon_name in ((-1, "chevron-left"), (1, "chevron-right")):
+            button = FlatButton(
+                canvas,
+                " ",
+                lambda s=side: self._navigate(s),
+                fonts=self.fonts,
+                padx=8,
+                pady=10,
+                bg=NAV_IDLE_BG,
+                fg=TEXT,
+                hover_bg=NAV_HOVER_BG,
+                press_bg=NAV_PRESS_BG,
+                image=self.icons.get(icon_name, NAV_ARROW_SIZE, TEXT),
+                disabled_image=self.icons.get(
+                    icon_name, NAV_ARROW_SIZE, DISABLED_TEXT
+                ),
+                compound="center",
+                highlightthickness=1,
+                highlightbackground=BORDER,
+                bd=0,
+            )
+            self._nav_buttons[side] = button
+            button.bind(
+                "<Enter>",
+                lambda _event, s=side: self._reveal_nav_side(s),
+                add="+",
+            )
+            button.bind("<Leave>", self._schedule_nav_check, add="+")
+        canvas.bind("<Motion>", self._on_nav_motion, add="+")
+        canvas.bind("<Enter>", self._on_nav_motion, add="+")
+        canvas.bind("<Leave>", self._schedule_nav_check, add="+")
+        self._update_nav_enabled()
+
+    def _update_nav_enabled(self) -> None:
+        if not self._nav_buttons:
+            return
+        self._nav_buttons[-1].set_enabled(self._nav_has_newer)
+        self._nav_buttons[1].set_enabled(self._nav_has_older)
+
+    def _on_nav_motion(self, event: tk.Event) -> None:
+        if not self._nav_buttons:
+            return
+        self._cancel_nav_check()
+        width = max(1, self._canvas.canvas.winfo_width())
+        self._set_nav_visible(-1, event.x <= NAV_EDGE_ZONE_PX)
+        self._set_nav_visible(
+            1, event.x >= width - NAV_EDGE_ZONE_PX
+        )
+
+    def _reveal_nav_side(self, side: int) -> None:
+        self._cancel_nav_check()
+        self._set_nav_visible(side, True)
+        self._set_nav_visible(-side, False)
+
+    def _schedule_nav_check(self, _event=None) -> None:
+        if not self._nav_buttons or self._closed:
+            return
+        self._cancel_nav_check()
+        self._nav_check_job = self.after(70, self._check_nav_hover)
+
+    def _cancel_nav_check(self) -> None:
+        job = self._nav_check_job
+        self._nav_check_job = None
+        if job is not None:
+            try:
+                self.after_cancel(job)
+            except tk.TclError:
+                pass
+
+    def _check_nav_hover(self) -> None:
+        self._nav_check_job = None
+        if self._closed or not self._nav_buttons:
+            return
+        try:
+            pointer_x, pointer_y = self.winfo_pointerxy()
+            under = self.winfo_containing(pointer_x, pointer_y)
+        except (tk.TclError, KeyError):
+            # Tk's native file dialog is created in Tcl and is not registered
+            # as a Python widget, so winfo_containing() can raise KeyError
+            # (nametowidget) while it owns the pointer/grab.
+            self._hide_nav_arrows()
+            return
+        for side, button in self._nav_buttons.items():
+            if under is not None and _is_descendant_or_self(under, button):
+                self._set_nav_visible(side, True)
+                self._set_nav_visible(-side, False)
+                return
+        canvas = self._canvas.canvas
+        if under is not None and _is_descendant_or_self(under, canvas):
+            x = pointer_x - canvas.winfo_rootx()
+            width = max(1, canvas.winfo_width())
+            self._set_nav_visible(-1, x <= NAV_EDGE_ZONE_PX)
+            self._set_nav_visible(
+                1, x >= width - NAV_EDGE_ZONE_PX
+            )
+            return
+        self._hide_nav_arrows()
+
+    def _set_nav_visible(self, side: int, visible: bool) -> None:
+        button = self._nav_buttons.get(side)
+        if button is None or self._nav_visible.get(side) == visible:
+            return
+        self._nav_visible[side] = visible
+        if visible:
+            button.place(
+                in_=self._canvas.canvas,
+                relx=0.0 if side == -1 else 1.0,
+                rely=0.5,
+                x=NAV_INSET_PX if side == -1 else -NAV_INSET_PX,
+                anchor="w" if side == -1 else "e",
+            )
+            button.lift()
+        else:
+            button.place_forget()
+
+    def _hide_nav_arrows(self) -> None:
+        self._set_nav_visible(-1, False)
+        self._set_nav_visible(1, False)
+
     def _focus(self) -> None:
         if self._closed:
             return
@@ -383,21 +556,33 @@ class CaptureEditor(tk.Toplevel):
             except tk.TclError:
                 pass
 
-    def _autosave(self) -> None:
+    def _autosave(self) -> bool:
         self._autosave_job = None
         if self._closed or self.on_autosave is None:
-            return
+            return False
         try:
             rendered = self._canvas.render()
-            self.on_autosave(rendered)
+            result = self.on_autosave(rendered)
         except Exception as exc:
             log.exception("自动保存截图失败")
             self._status_var.set(f"自动保存失败：{exc}")
             self.show_toast(f"自动保存失败：{exc}", error=True)
-            return
+            return False
+        if result is False:
+            message = "自动保存失败：最近截图未能更新"
+            log.warning("编辑器：%s，图片=%d×%d", message, *rendered.size)
+            self._status_var.set(message)
+            self.show_toast(message, error=True)
+            return False
         self._done = True
         self.mark_exported()
         self._status_var.set("修改已自动保存。")
+        log.info(
+            "编辑器：自动保存成功，图片=%d×%d",
+            rendered.width,
+            rendered.height,
+        )
+        return True
 
     def _flush_autosave(self) -> None:
         if self._autosave_job is None:
@@ -405,11 +590,103 @@ class CaptureEditor(tk.Toplevel):
         self._cancel_autosave()
         self._autosave()
 
+    def _persist_before_navigation(self) -> bool:
+        self._cancel_autosave()
+        if self.document.content_signature() == self._clean_signature:
+            return True
+        log.info("编辑器导航：切换前保存当前修改")
+        if self.on_autosave is None:
+            message = "自动保存不可用，已取消切换。"
+            log.warning("编辑器导航：%s", message)
+            self._status_var.set(message)
+            self.show_toast(message, error=True)
+            return False
+        if not self._autosave():
+            message = "自动保存失败，已取消切换。"
+            log.warning("编辑器导航：%s", message)
+            self._status_var.set(message)
+            self.show_toast(message, error=True)
+            return False
+        return True
+
+    def _navigate(self, direction: int) -> None:
+        label = "上一张（更新）" if direction == -1 else "下一张（更早）"
+        log.info("用户操作：编辑器%s", label)
+        if (
+            self._closed
+            or self._navigating
+            or self.on_navigate is None
+            or direction not in (-1, 1)
+        ):
+            log.warning("编辑器导航被忽略：编辑器已关闭或导航不可用")
+            return
+        if direction == -1 and not self._nav_has_newer:
+            log.info("编辑器导航：没有更新的一张")
+            return
+        if direction == 1 and not self._nav_has_older:
+            log.info("编辑器导航：没有更早的一张")
+            return
+        self._navigating = True
+        try:
+            self._canvas.commit_pending_entry()
+            if not self._persist_before_navigation():
+                return
+            try:
+                target = self.on_navigate(direction)
+            except Exception as exc:
+                log.exception("切换相邻截图失败")
+                message = f"切换截图失败：{exc}"
+                self._status_var.set(message)
+                self.show_toast(message, error=True)
+                return
+            if target is None:
+                message = "没有可切换的截图。"
+                log.warning("编辑器导航失败：%s", message)
+                self._status_var.set(message)
+                self.show_toast(message, error=True)
+                return
+            self._apply_navigation_target(target)
+        finally:
+            self._navigating = False
+
+    def _apply_navigation_target(self, target: NavigationTarget) -> None:
+        log.info(
+            "编辑器：切换到记录 id=%s，图片=%d×%d，可切换：更新=%s 更早=%s",
+            target.entry_id,
+            target.image.width,
+            target.image.height,
+            target.has_newer,
+            target.has_older,
+        )
+        document = AnnotationDocument(target.image, self.font_resolver)
+        self.image = target.image.copy()
+        self.document = document
+        self._canvas.set_document(document)
+        self.mark_exported()
+        self._size_var.set(
+            f"{document.base.width} × {document.base.height}"
+        )
+        self._nav_has_newer = target.has_newer
+        self._nav_has_older = target.has_older
+        self._update_nav_enabled()
+        self._cancel_autosave()
+        self._done = False
+        self._status_var.set("已切换到相邻截图。")
+        self.show_toast("已切换截图")
+        try:
+            self._canvas.canvas.focus_set()
+        except tk.TclError:
+            pass
+
     def _on_zoom(self, scale: float) -> None:
         self._zoom_var.set(f"缩放 {scale * 100:.0f}%")
 
     # -------------------------------------------------------------- actions
     def show_toast(self, message: str, error: bool = False) -> None:
+        if error:
+            log.warning("编辑器提示：%s", message)
+        else:
+            log.info("编辑器提示：%s", message)
         if self._toast_job is not None:
             try:
                 self.after_cancel(self._toast_job)
@@ -489,6 +766,11 @@ class CaptureEditor(tk.Toplevel):
         self._cancel_autosave()
         self.mark_exported()
         self._status_var.set("已复制到剪贴板。")
+        log.info(
+            "用户操作：编辑器复制截图，图片=%d×%d",
+            rendered.width,
+            rendered.height,
+        )
         self.show_toast("已复制到剪贴板")
         self._flash_copy_button()
 
@@ -503,6 +785,11 @@ class CaptureEditor(tk.Toplevel):
             self._canvas.commit_pending_entry()
             rendered = self._canvas.render()
             self.on_copy(rendered)
+            log.info(
+                "用户操作：关闭编辑器时自动复制截图，图片=%d×%d",
+                rendered.width,
+                rendered.height,
+            )
         except Exception as exc:
             log.exception("关闭截图时自动复制失败")
             self._status_var.set(f"自动复制失败：{exc}")
@@ -520,12 +807,18 @@ class CaptureEditor(tk.Toplevel):
         self._cancel_autosave()
         self.mark_exported()
         self._status_var.set(f"已保存：{path}")
+        log.info(
+            "用户操作：编辑器保存截图到 %s，图片=%d×%d",
+            path,
+            rendered.width,
+            rendered.height,
+        )
         self.show_toast("保存成功")
 
     def _release_stale_grab(self) -> None:
         try:
             current = self.grab_current()
-        except tk.TclError:
+        except (tk.TclError, KeyError):
             return
         if current is None:
             return
@@ -539,8 +832,9 @@ class CaptureEditor(tk.Toplevel):
         self._canvas.commit_pending_entry()
         self._release_stale_grab()
         extension = self._extension()
-        path = filedialog.asksaveasfilename(
-            parent=self,
+        path = open_native_file_dialog(
+            self,
+            filedialog.asksaveasfilename,
             title="截图另存为",
             defaultextension=f".{extension}",
             filetypes=(
@@ -552,13 +846,19 @@ class CaptureEditor(tk.Toplevel):
             initialfile=f"screenshot.{extension}",
         )
         if not path:
+            log.info("用户操作：取消另存为截图")
+            try:
+                self._canvas.canvas.focus_set()
+            except tk.TclError:
+                pass
             return
+        log.info("用户操作：截图另存为 %s", path)
         try:
             self._canvas.commit_pending_entry()
             rendered = self._canvas.render()
             saved = self.on_save(rendered, Path(path))
         except Exception as exc:
-            log.exception("另存截图失败")
+            log.exception("另存截图失败：%s", path)
             self._status_var.set(f"保存失败：{exc}")
             return
         self._done = True
@@ -588,6 +888,9 @@ class CaptureEditor(tk.Toplevel):
     def _request_close(self, *, return_to_assistant: bool) -> None:
         if self._closed:
             return
+        log.info(
+            "用户操作：请求关闭编辑器，返回助手=%s", return_to_assistant
+        )
         self._canvas.commit_pending_entry()
         # 自动保存成功后 mark_exported() 会把基线前移，正常关闭就不会命中。
         modified = self.document.content_signature() != self._clean_signature
@@ -604,11 +907,14 @@ class CaptureEditor(tk.Toplevel):
             else:
                 title = "关闭截图"
                 message = f"{reason}，确定关闭吗？"
-            confirmed = messagebox.askyesno(
-                title,
-                message,
-                parent=self,
+            log.warning("编辑器关闭：存在未保存修改，弹出确认框")
+            confirmed = run_modal_dialog(
+                self,
+                lambda **kwargs: messagebox.askyesno(
+                    title, message, **kwargs
+                ),
             )
+            log.info("编辑器关闭：未保存确认结果=%s", confirmed)
             if not confirmed:
                 return
         self._copy_on_close()
@@ -617,6 +923,11 @@ class CaptureEditor(tk.Toplevel):
     def _finish(self, return_to_assistant: bool = False) -> None:
         if self._closed:
             return
+        log.info(
+            "编辑器：窗口关闭，完成=%s，返回助手=%s",
+            self._done,
+            return_to_assistant,
+        )
         self._closed = True
         for job_name in (
             "_focus_job",
@@ -624,6 +935,7 @@ class CaptureEditor(tk.Toplevel):
             "_toast_job",
             "_copy_flash_job",
             "_autosave_job",
+            "_nav_check_job",
         ):
             job = getattr(self, job_name, None)
             if job is not None:
@@ -638,6 +950,7 @@ class CaptureEditor(tk.Toplevel):
             except tk.TclError:
                 pass
             self._toast_label = None
+        self._hide_nav_arrows()
         try:
             self._canvas.dispose()
         except Exception:

@@ -368,3 +368,60 @@ def test_stop_releases_backend(service) -> None:
     instance.start()
     instance.stop()
     assert backend.stopped is True
+
+
+def test_drain_runs_periodic_maintenance(service, monkeypatch) -> None:
+    from quicktools.plugins.clipboard.store import MaintenanceStats
+
+    instance, _backend, _root, _tmp = service
+    calls: list[int] = []
+    monkeypatch.setattr(
+        instance.store,
+        "maintenance",
+        lambda: calls.append(1) or MaintenanceStats(missing_images=1),
+    )
+    events: list[tuple[str, int | None]] = []
+    instance.add_listener(lambda event, entry_id: events.append((event, entry_id)))
+    instance.start()
+    instance._last_maintenance = 0.0
+
+    instance._drain()
+
+    assert calls == [1]
+    assert ("settings", None) in events
+
+
+def test_maintenance_is_throttled(service, monkeypatch) -> None:
+    from quicktools.plugins.clipboard.store import MaintenanceStats
+
+    instance, _backend, _root, _tmp = service
+    calls: list[int] = []
+    monkeypatch.setattr(
+        instance.store,
+        "maintenance",
+        lambda: calls.append(1) or MaintenanceStats(),
+    )
+    instance._last_maintenance = 0.0
+
+    instance.maintenance()
+    instance.maintenance()
+    assert len(calls) == 1
+
+    instance.maintenance(force=True)
+    assert len(calls) == 2
+
+
+def test_entries_limit_and_offset(service) -> None:
+    instance, _backend, _root, _tmp = service
+    entries = [
+        instance.store.add(
+            ClipboardContent(kind=ClipboardKind.TEXT, text=f"entry {index}")
+        )
+        for index in range(5)
+    ]
+    page = instance.entries(limit=2, offset=2)
+    assert len(page) == 2
+    assert {entry.id for entry in page} == {
+        entries[1].id,
+        entries[2].id,
+    }

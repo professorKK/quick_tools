@@ -4,10 +4,12 @@ from __future__ import annotations
 
 import io
 import json
+import logging
 import os
 import sqlite3
 import time
 import uuid
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Iterable
 
@@ -26,8 +28,29 @@ from .models import (
 )
 from .platform_utils import first_line
 
+log = logging.getLogger(__name__)
+
 MAX_SINGLE_IMAGE_BYTES = 50 * 1024 * 1024
 THUMB_MAX_SIDE = 360
+ORPHAN_GRACE_SECONDS = 60.0
+STALE_TEMP_SECONDS = 60.0
+
+
+@dataclass(frozen=True)
+class MaintenanceStats:
+    missing_images: int = 0
+    orphan_images: int = 0
+    orphan_thumbs: int = 0
+    temp_files: int = 0
+
+    @property
+    def total(self) -> int:
+        return (
+            self.missing_images
+            + self.orphan_images
+            + self.orphan_thumbs
+            + self.temp_files
+        )
 
 
 def _escape_like(value: str) -> str:
@@ -60,6 +83,7 @@ class ClipboardStore:
         self._conn.execute("PRAGMA journal_mode=WAL")
         self._conn.execute("PRAGMA synchronous=NORMAL")
         self._init_schema()
+        self.maintenance()
 
     # ------------------------------------------------------------- schema
     def _init_schema(self) -> None:
@@ -347,6 +371,8 @@ class ClipboardStore:
         query: str = "",
         *,
         newest_first: bool = True,
+        limit: int | None = None,
+        offset: int = 0,
     ) -> list[ClipboardEntry]:
         clauses: list[str] = []
         params: list[object] = []
@@ -366,7 +392,14 @@ class ClipboardStore:
         if clauses:
             sql += " WHERE " + " AND ".join(clauses)
         order = "DESC" if newest_first else "ASC"
-        sql += f" ORDER BY last_copied_at {order}, id {order} LIMIT 2000"
+        sql += f" ORDER BY last_copied_at {order}, id {order}"
+        offset = max(0, int(offset))
+        if limit is not None:
+            sql += " LIMIT ? OFFSET ?"
+            params.extend((max(0, int(limit)), offset))
+        elif offset:
+            sql += " LIMIT -1 OFFSET ?"
+            params.append(offset)
         rows = self._conn.execute(sql, params).fetchall()
         return [self._row_to_entry(row) for row in rows]
 
@@ -461,6 +494,168 @@ class ClipboardStore:
         for row in rows:
             self._delete_owned_paths((row["image_path"], row["thumb_path"]))
         return len(rows)
+
+    @staticmethod
+    def _owned_name(relative: str | None, subdir: str) -> str | None:
+        if not relative:
+            return None
+        candidate = Path(relative)
+        if candidate.is_absolute():
+            return None
+        try:
+            parts = candidate.relative_to(subdir)
+        except ValueError:
+            return None
+        if len(parts.parts) != 1:
+            return None
+        return parts.name
+
+    @staticmethod
+    def _scan_owned(directory: Path):
+        files: dict[str, float] = {}
+        temps: list[tuple[Path, float]] = []
+        try:
+            with os.scandir(directory) as iterator:
+                for entry in iterator:
+                    try:
+                        if entry.is_symlink() or not entry.is_file(
+                            follow_symlinks=False
+                        ):
+                            continue
+                        stat = entry.stat(follow_symlinks=False)
+                    except OSError:
+                        continue
+                    if entry.name.endswith(".tmp"):
+                        temps.append((Path(entry.path), stat.st_mtime))
+                    else:
+                        files[entry.name] = stat.st_mtime
+        except OSError:
+            log.exception("剪贴板：扫描数据目录失败 %s", directory)
+            return None, []
+        return files, temps
+
+    def maintenance(
+        self,
+        *,
+        orphan_grace_seconds: float = ORPHAN_GRACE_SECONDS,
+        temp_grace_seconds: float = STALE_TEMP_SECONDS,
+    ) -> MaintenanceStats:
+        """Remove missing image rows and unreferenced/temporary files."""
+        try:
+            rows = self._conn.execute(
+                "SELECT id, kind, image_path, thumb_path FROM entries"
+            ).fetchall()
+        except Exception:
+            log.exception("剪贴板：读取维护数据失败")
+            return MaintenanceStats()
+        image_refs: set[str] = set()
+        thumb_refs: set[str] = set()
+        for row in rows:
+            name = self._owned_name(row["image_path"], "images")
+            if name:
+                image_refs.add(name)
+            name = self._owned_name(row["thumb_path"], "thumbs")
+            if name:
+                thumb_refs.add(name)
+
+        images, image_temps = self._scan_owned(self.images_dir)
+        thumbs, thumb_temps = self._scan_owned(self.thumbs_dir)
+
+        missing_images = 0
+        if images is not None:
+            missing = [
+                row
+                for row in rows
+                if row["kind"] == "image"
+                and (
+                    self._owned_name(row["image_path"], "images")
+                    not in images
+                )
+            ]
+            if missing:
+                with self._conn:
+                    self._conn.executemany(
+                        "DELETE FROM entries WHERE id = ?",
+                        [(row["id"],) for row in missing],
+                    )
+                for row in missing:
+                    self._delete_owned_paths(
+                        (row["image_path"], row["thumb_path"])
+                    )
+                    name = self._owned_name(row["thumb_path"], "thumbs")
+                    if name:
+                        thumb_refs.discard(name)
+                missing_images = len(missing)
+                image_refs = {
+                    name for name in image_refs if name in images
+                }
+                log.warning(
+                    "剪贴板：清理 %d 条原图缺失的图片记录",
+                    missing_images,
+                )
+
+        now = time.time()
+        orphan_images = 0
+        if images is not None:
+            for name, mtime in images.items():
+                if name in image_refs:
+                    continue
+                if now - mtime < orphan_grace_seconds:
+                    continue
+                try:
+                    (self.images_dir / name).unlink()
+                    orphan_images += 1
+                except FileNotFoundError:
+                    pass
+                except OSError:
+                    log.debug("剪贴板：删除孤儿图片失败 %s", name, exc_info=True)
+
+        orphan_thumbs = 0
+        if thumbs is not None:
+            for name, mtime in thumbs.items():
+                if name in thumb_refs:
+                    continue
+                if now - mtime < orphan_grace_seconds:
+                    continue
+                try:
+                    (self.thumbs_dir / name).unlink()
+                    orphan_thumbs += 1
+                except FileNotFoundError:
+                    pass
+                except OSError:
+                    log.debug("剪贴板：删除孤儿缩略图失败 %s", name, exc_info=True)
+
+        temp_files = 0
+        for path, mtime in (*image_temps, *thumb_temps):
+            if now - mtime < temp_grace_seconds:
+                continue
+            try:
+                path.unlink()
+                temp_files += 1
+            except FileNotFoundError:
+                pass
+            except OSError:
+                log.debug("剪贴板：删除临时文件失败 %s", path, exc_info=True)
+
+        stats = MaintenanceStats(
+            missing_images=missing_images,
+            orphan_images=orphan_images,
+            orphan_thumbs=orphan_thumbs,
+            temp_files=temp_files,
+        )
+        if stats.total:
+            log.warning(
+                "剪贴板维护：缺失图片=%d 孤儿图片=%d 孤儿缩略图=%d 临时文件=%d",
+                stats.missing_images,
+                stats.orphan_images,
+                stats.orphan_thumbs,
+                stats.temp_files,
+            )
+        return stats
+
+    def remove_missing_images(self) -> int:
+        """Compatibility wrapper: maintenance for missing image rows."""
+        return self.maintenance().missing_images
 
     def prune(self, *, max_entries: int, max_image_bytes: int) -> int:
         """Drop old rows and old images, deleting only plugin-owned files."""

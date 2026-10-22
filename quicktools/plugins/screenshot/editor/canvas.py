@@ -22,6 +22,11 @@ from quicktools.ui_theme import (
     center_on_screen,
 )
 
+from quicktools.modal_dialogs import (
+    open_native_file_dialog,
+    run_modal_dialog,
+)
+
 from ..models import Point, Rect
 from .annotations import (
     RESIZABLE_TOOLS,
@@ -39,6 +44,23 @@ from .document import AnnotationDocument
 from .render import render_annotation_preview
 
 log = logging.getLogger(__name__)
+
+CANVAS_BG = "#d8d5cf"
+
+_TOOL_NAMES = {
+    Tool.SELECT: "选择",
+    Tool.RECT: "矩形",
+    Tool.ELLIPSE: "圆形",
+    Tool.ARROW: "箭头",
+    Tool.BRUSH: "画笔",
+    Tool.TEXT: "文字",
+    Tool.NUMBER: "序号",
+    Tool.MOSAIC: "马赛克",
+    Tool.STICKER: "贴纸",
+    Tool.WATERMARK: "水印",
+    Tool.CROP: "裁剪",
+    Tool.LASSO: "套索裁剪",
+}
 
 StatusHandler = Callable[[str], None]
 ChangeHandler = Callable[[], None]
@@ -66,17 +88,30 @@ class _TextPromptDialog(tk.Toplevel):
         self.title(title)
         self.configure(bg=BG)
         self.resizable(False, False)
-        try:
-            if parent.winfo_viewable():
-                self.transient(parent)
-        except tk.TclError:
-            pass
+        # Managed dialogs are composited below the override-redirect editor on
+        # X11; use the same frameless style as the rest of QuickTools.
+        self.overrideredirect(True)
         self.protocol("WM_DELETE_WINDOW", self.cancel)
         self.bind("<Return>", lambda _event: self.ok())
         self.bind("<Escape>", lambda _event: self.cancel())
 
-        shell = tk.Frame(self, bg=BG, padx=18, pady=14)
+        shell = tk.Frame(
+            self,
+            bg=BG,
+            padx=18,
+            pady=14,
+            highlightbackground=BORDER,
+            highlightthickness=1,
+        )
         shell.pack(fill="both", expand=True)
+        tk.Label(
+            shell,
+            text=title,
+            bg=BG,
+            fg=TEXT,
+            anchor="w",
+            font=fonts.u(11, "bold"),
+        ).pack(fill="x", pady=(0, 6))
         tk.Label(
             shell,
             text=prompt,
@@ -120,9 +155,15 @@ class _TextPromptDialog(tk.Toplevel):
             pady=6,
         ).pack(side="right", padx=(0, 8))
 
-        center_on_screen(self, 440, 180, parent=parent)
+        center_on_screen(self, 440, 210, parent=parent)
         self.deiconify()
         self.lift()
+        try:
+            from quicktools import x11_focus
+
+            x11_focus.force_foreground(self)
+        except Exception:
+            pass
         try:
             self.focus_force()
             self._entry.focus_force()
@@ -150,7 +191,7 @@ class _TextPromptDialog(tk.Toplevel):
             current = self.grab_current()
             if current is self:
                 current.grab_release()
-        except tk.TclError:
+        except (tk.TclError, KeyError):
             pass
         try:
             self.destroy()
@@ -170,7 +211,7 @@ class AnnotationCanvas(tk.Frame):
         on_change: ChangeHandler | None = None,
         on_zoom: Callable[[float], None] | None = None,
     ) -> None:
-        super().__init__(master, bg="#20242b")
+        super().__init__(master, bg=CANVAS_BG)
         self.document = document
         self.fonts = fonts
         self.style = style.copy()
@@ -209,7 +250,7 @@ class AnnotationCanvas(tk.Frame):
 
         self.canvas = tk.Canvas(
             self,
-            bg="#20242b",
+            bg=CANVAS_BG,
             highlightthickness=0,
             bd=0,
             cursor="arrow",
@@ -530,7 +571,13 @@ class AnnotationCanvas(tk.Frame):
             self._crop_rect = None
             self._crop_original = None
             self._crop_handle = None
+        previous_tool = self.tool
         self.tool = new_tool
+        if new_tool is not previous_tool:
+            log.info(
+                "用户操作：切换标注工具为“%s”",
+                _TOOL_NAMES.get(new_tool, new_tool.value),
+            )
         if new_tool is not Tool.SELECT and not keep_selection:
             self.document.select(None)
         self._restore_cursor()
@@ -553,9 +600,15 @@ class AnnotationCanvas(tk.Frame):
         self.redraw_annotations()
 
     def set_style(self, **changes) -> None:
+        changed = {}
         for key, value in changes.items():
             if hasattr(self.style, key):
+                old = getattr(self.style, key)
                 setattr(self.style, key, value)
+                if old != value:
+                    changed[key] = value
+        if changed:
+            log.info("用户操作：修改标注样式 %s", changed)
         selected = self.document.selected()
         if selected is not None:
             self.document.update_style(selected.id, **changes)
@@ -572,11 +625,18 @@ class AnnotationCanvas(tk.Frame):
         old_size = self.document.image_size
         changed = self.document.undo()
         if changed:
+            log.info(
+                "用户操作：撤销，图片=%d×%d，标注=%d",
+                *self.document.image_size,
+                len(self.document.annotations),
+            )
             if self.document.image_size != old_size:
                 self._fit_mode = True
                 self._fit_cap_one = False
             self._recompute_view()
             self._notify_change()
+        else:
+            log.info("用户操作：撤销（没有可撤销操作）")
         return changed
 
     def redo(self) -> bool:
@@ -584,11 +644,18 @@ class AnnotationCanvas(tk.Frame):
         old_size = self.document.image_size
         changed = self.document.redo()
         if changed:
+            log.info(
+                "用户操作：重做，图片=%d×%d，标注=%d",
+                *self.document.image_size,
+                len(self.document.annotations),
+            )
             if self.document.image_size != old_size:
                 self._fit_mode = True
                 self._fit_cap_one = False
             self._recompute_view()
             self._notify_change()
+        else:
+            log.info("用户操作：重做（没有可重做操作）")
         return changed
 
     def reset_to_original(self) -> bool:
@@ -598,12 +665,40 @@ class AnnotationCanvas(tk.Frame):
         self._crop_original = None
         self._crop_handle = None
         self.document.reset()
+        log.info("用户操作：重置到未编辑状态")
         self._fit_mode = True
         self._fit_cap_one = True
         self._recompute_view()
         self._notify_change()
         self._report_status("已重置到未编辑状态")
         return True
+
+    def set_document(self, document: AnnotationDocument) -> None:
+        """Replace the edited image and reset transient/history state."""
+        self._cancel_entry()
+        self._cancel_lasso()
+        if self._redraw_job is not None:
+            try:
+                self.after_cancel(self._redraw_job)
+            except tk.TclError:
+                pass
+            self._redraw_job = None
+        self._drag_mode = None
+        self._drag_start = None
+        self._drag_original = None
+        self._drag_handle = None
+        self._temp = None
+        self._crop_rect = None
+        self._crop_original = None
+        self._crop_handle = None
+        self._pan_start = None
+        self.document = document
+        self.set_tool(Tool.SELECT)
+        self._fit_mode = True
+        self._fit_cap_one = True
+        self._offset_x = 0.0
+        self._offset_y = 0.0
+        self._recompute_view()
 
     def apply_crop(self) -> bool:
         if self.tool is not Tool.CROP or self._crop_rect is None:
@@ -623,7 +718,13 @@ class AnnotationCanvas(tk.Frame):
             self._report_status("裁剪区域没有变化")
             return False
         if not self.document.crop(crop):
+            log.warning("裁剪失败：区域无效 %s", crop)
             return False
+        log.info(
+            "用户操作：裁剪截图，区域=%s，结果=%d×%d",
+            crop,
+            *self.document.base.size,
+        )
         self.set_tool(Tool.SELECT)
         self._fit_mode = True
         self._fit_cap_one = False
@@ -642,11 +743,46 @@ class AnnotationCanvas(tk.Frame):
             log.exception("截图编辑器状态回调失败")
 
     def rotate(self, clockwise: bool = True) -> None:
+        selected = self.document.selected()
+        if (
+            selected is not None
+            and selected.tool is Tool.STICKER
+            and self.document.rotate_sticker(clockwise)
+        ):
+            self.redraw_annotations()
+            self._notify_change()
+            log.info(
+                "用户操作：旋转贴纸 90°，边界=%s",
+                selected.bounds,
+            )
+            self._report_status("贴纸已旋转 90°")
+            return
+        log.info("用户操作：旋转整张截图，顺时针=%s", clockwise)
         self.document.rotate(clockwise)
         self._recompute_view()
         self._notify_change()
 
     def flip(self, horizontal: bool = True) -> None:
+        selected = self.document.selected()
+        if (
+            selected is not None
+            and selected.tool is Tool.STICKER
+            and self.document.flip_sticker(horizontal)
+        ):
+            self.redraw_annotations()
+            self._notify_change()
+            log.info(
+                "用户操作：翻转贴纸，方向=%s",
+                "水平" if horizontal else "垂直",
+            )
+            self._report_status(
+                "贴纸已水平翻转" if horizontal else "贴纸已垂直翻转"
+            )
+            return
+        log.info(
+            "用户操作：翻转整张截图，方向=%s",
+            "水平" if horizontal else "垂直",
+        )
         self.document.flip(horizontal)
         self._recompute_view()
         self._notify_change()
@@ -656,8 +792,15 @@ class AnnotationCanvas(tk.Frame):
         if selected is None:
             return
         if self.document.remove(selected.id):
+            log.info(
+                "用户操作：删除标注 id=%s，工具=%s",
+                selected.id,
+                _TOOL_NAMES.get(selected.tool, selected.tool.value),
+            )
             self.redraw_annotations()
             self._notify_change()
+        else:
+            log.warning("删除标注失败：id=%s 不存在", selected.id)
 
     def apply_selected_style(self, **changes) -> None:
         self.set_style(**changes)
@@ -682,6 +825,12 @@ class AnnotationCanvas(tk.Frame):
             return
         if self.tool is Tool.NUMBER:
             annotation = self.document.add_number(point, self.style)
+            log.info(
+                "用户操作：添加序号 %s，id=%s，位置=%s",
+                annotation.number,
+                annotation.id,
+                point,
+            )
             self.document.select(annotation.id)
             self.set_tool(Tool.SELECT, keep_selection=True)
             self._notify_change()
@@ -794,9 +943,21 @@ class AnnotationCanvas(tk.Frame):
             self._finish_drawing(point)
             return
         if self._drag_mode in ("move", "resize"):
+            mode = self._drag_mode
+            handle = self._drag_handle
+            selected = self.document.selected()
             self._drag_mode = None
             self._drag_original = None
             self._drag_handle = None
+            if selected is not None:
+                log.info(
+                    "用户操作：%s标注 id=%s，工具=%s，控制点=%s，边界=%s",
+                    "移动" if mode == "move" else "缩放",
+                    selected.id,
+                    _TOOL_NAMES.get(selected.tool, selected.tool.value),
+                    handle or "",
+                    selected.bounds,
+                )
             self.redraw_annotations()
             self._notify_change()
 
@@ -876,6 +1037,12 @@ class AnnotationCanvas(tk.Frame):
         tolerance = 8 / max(0.05, self._view_scale)
         if selected is not None:
             handle = self.document.handle_at(selected, point, tolerance)
+            if handle is None and selected.tool in RESIZABLE_TOOLS:
+                # Allow dragging the dashed frame itself, not just the small
+                # corner/edge handles.
+                handle = self._selection_edge_at(
+                    selected.bounds, point, tolerance
+                )
             if handle is not None:
                 self.document.begin_interaction()
                 self._drag_mode = "resize"
@@ -885,11 +1052,23 @@ class AnnotationCanvas(tk.Frame):
                 return
         hit = self.document.hit_test(point)
         if hit is None:
+            if self.document.selected_id is not None:
+                log.info(
+                    "用户操作：取消选中标注 id=%s",
+                    self.document.selected_id,
+                )
             self.document.select(None)
             self.redraw_annotations()
             if event is not None:
                 self._begin_pan(event)
             return
+        if self.document.selected_id != hit.id:
+            log.info(
+                "用户操作：选中标注 id=%s，工具=%s，边界=%s",
+                hit.id,
+                _TOOL_NAMES.get(hit.tool, hit.tool.value),
+                hit.bounds,
+            )
         self.document.select(hit.id)
         self.document.begin_interaction()
         self._drag_mode = "move"
@@ -897,6 +1076,25 @@ class AnnotationCanvas(tk.Frame):
         self._drag_original = hit.clone()
         self._drag_handle = None
         self.redraw_annotations()
+
+    def _selection_edge_at(
+        self, bounds: Rect, point: Point, tolerance: float
+    ) -> str | None:
+        near_left = abs(point.x - bounds.left) <= tolerance
+        near_right = abs(point.x - bounds.right) <= tolerance
+        near_top = abs(point.y - bounds.top) <= tolerance
+        near_bottom = abs(point.y - bounds.bottom) <= tolerance
+        inside_x = bounds.left - tolerance <= point.x <= bounds.right + tolerance
+        inside_y = bounds.top - tolerance <= point.y <= bounds.bottom + tolerance
+        if near_left and inside_y:
+            return "w"
+        if near_right and inside_y:
+            return "e"
+        if near_top and inside_x:
+            return "n"
+        if near_bottom and inside_x:
+            return "s"
+        return None
 
     # ----------------------------------------------------------- drawing
     def _start_drawing(self, point: Point) -> None:
@@ -960,7 +1158,15 @@ class AnnotationCanvas(tk.Frame):
             ):
                 temp.points.append(Point(point.x, point.y))
             if temp.points:
-                self.document.add_brush(temp.points, self.style)
+                annotation = self.document.add_brush(
+                    temp.points, self.style
+                )
+                log.info(
+                    "用户操作：添加画笔标注 id=%s，点数=%d，边界=%s",
+                    annotation.id,
+                    len(temp.points),
+                    annotation.bounds,
+                )
             self.document.select(None)
             self.redraw_annotations()
             self._notify_change()
@@ -973,13 +1179,29 @@ class AnnotationCanvas(tk.Frame):
             if abs(end.x - start.x) + abs(end.y - start.y) < 4:
                 self.redraw_annotations()
                 return
-            self.document.add_arrow(start, end, self.style)
+            annotation = self.document.add_arrow(
+                start, end, self.style
+            )
+            log.info(
+                "用户操作：添加箭头标注 id=%s，起点=%s，终点=%s",
+                annotation.id,
+                start,
+                end,
+            )
         else:
             rect = temp.bounds.normalized()
             if rect.width < 4 or rect.height < 4:
                 self.redraw_annotations()
                 return
-            self.document.add_shape(temp.tool, rect, self.style)
+            annotation = self.document.add_shape(
+                temp.tool, rect, self.style
+            )
+            log.info(
+                "用户操作：添加%s标注 id=%s，边界=%s",
+                _TOOL_NAMES.get(temp.tool, temp.tool.value),
+                annotation.id,
+                rect,
+            )
         self.document.select(None)
         self.redraw_annotations()
         self._notify_change()
@@ -1087,7 +1309,7 @@ class AnnotationCanvas(tk.Frame):
     def _release_stale_grab(self) -> None:
         try:
             current = self.grab_current()
-        except tk.TclError:
+        except (tk.TclError, KeyError):
             return
         if current is None:
             return
@@ -1097,31 +1319,82 @@ class AnnotationCanvas(tk.Frame):
         except tk.TclError:
             pass
 
+    def add_sticker_at_center(self) -> None:
+        width, height = self.document.image_size
+        self._add_sticker(Point(width / 2, height / 2))
+
     def _add_sticker(self, point: Point) -> None:
         self._release_stale_grab()
-        path = filedialog.askopenfilename(
-            parent=self.winfo_toplevel(),
-            title="选择贴纸图片",
-            filetypes=(
-                ("图片", "*.png *.jpg *.jpeg *.webp *.gif *.bmp"),
-                ("所有文件", "*.*"),
-            ),
-        )
-        if not path:
+        log.info("用户操作：打开贴纸文件选择框，插入中心=%s", point)
+        self._report_status("请选择贴纸图片…")
+        try:
+            path = open_native_file_dialog(
+                self,
+                filedialog.askopenfilename,
+                title="选择贴纸图片",
+                filetypes=(
+                    ("图片", "*.png *.jpg *.jpeg *.webp *.gif *.bmp"),
+                    ("所有文件", "*.*"),
+                ),
+            )
+        except Exception as exc:
+            log.exception("打开贴纸文件选择框失败")
+            self.set_tool(Tool.SELECT)
+            message = f"打开文件选择框失败：{exc}"
+            self._report_status(message)
+            show_toast = getattr(self.winfo_toplevel(), "show_toast", None)
+            if callable(show_toast):
+                try:
+                    show_toast(message, error=True)
+                except Exception:
+                    pass
             return
+        if not path:
+            log.info("用户操作：取消选择贴纸图片")
+            self.set_tool(Tool.SELECT)
+            self._report_status("已取消添加贴纸")
+            try:
+                self.canvas.focus_set()
+            except tk.TclError:
+                pass
+            return
+        log.info("用户操作：选择贴纸图片 %s", path)
         try:
             with Image.open(path) as image:
                 image.load()
                 sticker = image.copy()
         except Exception as exc:
-            messagebox.showerror(
-                "贴纸加载失败", str(exc), parent=self.winfo_toplevel()
-            )
+            log.warning("贴纸加载失败：%s", path, exc_info=True)
+            message = f"贴纸加载失败：{exc}"
+            self.set_tool(Tool.SELECT)
+            self._report_status(message)
+            show_toast = getattr(self.winfo_toplevel(), "show_toast", None)
+            if callable(show_toast):
+                try:
+                    show_toast(message, error=True)
+                except Exception:
+                    pass
             return
+        try:
+            self.canvas.focus_set()
+        except tk.TclError:
+            pass
         annotation = self.document.add_sticker(sticker, point, self.style)
+        log.info(
+            "用户操作：插入贴纸 %s，原图=%d×%d，插入=%d×%d，边界=%s",
+            path,
+            sticker.width,
+            sticker.height,
+            annotation.bounds.width,
+            annotation.bounds.height,
+            annotation.bounds,
+        )
         self.document.select(annotation.id)
         self.set_tool(Tool.SELECT, keep_selection=True)
         self._notify_change()
+        self._report_status(
+            "贴纸已添加：拖动虚线框或控制点缩放，工具栏“左转/右转”旋转。"
+        )
 
     def _add_watermark(self) -> None:
         self._release_stale_grab()
@@ -1133,11 +1406,17 @@ class AnnotationCanvas(tk.Frame):
         )
         text = dialog.result
         if not text:
+            log.info("用户操作：取消添加水印")
             return
         style = self.style.copy()
         style.opacity = 128
         style.font_size = max(20, self.style.font_size * 2)
         annotation = self.document.add_watermark(text, style)
+        log.info(
+            "用户操作：添加水印 %r，边界=%s",
+            text[:80],
+            annotation.bounds,
+        )
         self.document.select(annotation.id)
         self.set_tool(Tool.SELECT, keep_selection=True)
         self._notify_change()
@@ -1172,15 +1451,24 @@ class AnnotationCanvas(tk.Frame):
         if len(points) < 3:
             return
         if self.document.annotations:
-            confirmed = messagebox.askyesno(
-                "套索裁剪",
-                "套索裁剪会丢弃已有标注，是否继续？",
-                parent=self.winfo_toplevel(),
+            confirmed = run_modal_dialog(
+                self,
+                lambda **kwargs: messagebox.askyesno(
+                    "套索裁剪",
+                    "套索裁剪会丢弃已有标注，是否继续？",
+                    **kwargs,
+                ),
             )
             if not confirmed:
                 return
         if not self.document.crop_lasso(points, drop_annotations=True):
+            log.warning("套索裁剪失败：区域无效或超出图片")
             return
+        log.info(
+            "用户操作：套索裁剪，路径点=%d，结果=%d×%d",
+            len(points),
+            *self.document.base.size,
+        )
         self.set_tool(Tool.SELECT, keep_selection=False)
         self._recompute_view()
         self._notify_change()
@@ -1204,17 +1492,18 @@ class AnnotationCanvas(tk.Frame):
         right = min(image.width, x + 8)
         bottom = min(image.height, y + 8)
         if right <= left or bottom <= top:
-            return "#20242b"
+            return CANVAS_BG
         try:
             pixel = image.crop((left, top, right, bottom)).convert(
                 "RGB"
             ).resize((1, 1), Image.LANCZOS).getpixel((0, 0))
             if not isinstance(pixel, tuple) or len(pixel) < 3:
-                return "#20242b"
+                return CANVAS_BG
             red, green, blue = pixel[:3]
             return f"#{red:02x}{green:02x}{blue:02x}"
         except Exception:
-            return "#20242b"
+            log.debug("采样文字输入框背景失败，使用画布背景色", exc_info=True)
+            return CANVAS_BG
 
     def _open_text_entry(
         self,
@@ -1324,9 +1613,20 @@ class AnnotationCanvas(tk.Frame):
         if existing is not None:
             self.document.update_text(existing.id, text)
             self.document.select(existing.id)
+            log.info(
+                "用户操作：修改文字标注 id=%s，内容=%r",
+                existing.id,
+                text[:80],
+            )
         else:
             annotation = self.document.add_text(text, point, self.style)
             self.document.select(annotation.id)
+            log.info(
+                "用户操作：添加文字标注 id=%s，内容=%r，位置=%s",
+                annotation.id,
+                text[:80],
+                point,
+            )
         self.set_tool(Tool.SELECT, keep_selection=True)
         self._notify_change()
 
@@ -1472,10 +1772,19 @@ class AnnotationCanvas(tk.Frame):
             width_px = max(1, int(round(box[2] - box[0])))
             height_px = max(1, int(round(box[3] - box[1])))
             try:
-                preview_image = annotation.image.convert("RGBA")
-                preview_image.thumbnail((width_px, height_px), Image.LANCZOS)
+                # Fill the annotation bounds exactly so the selection frame
+                # always hugs the sticker after edge/corner resizing.
+                preview_image = annotation.image.convert("RGBA").resize(
+                    (width_px, height_px), Image.LANCZOS
+                )
                 photo = ImageTk.PhotoImage(preview_image, master=self.canvas)
             except Exception:
+                log.warning(
+                    "渲染贴纸预览失败：标注 id=%s，图片尺寸=%s",
+                    annotation.id,
+                    getattr(annotation.image, "size", None),
+                    exc_info=True,
+                )
                 return
             self._sticker_photos.append(photo)
             self.canvas.create_image(

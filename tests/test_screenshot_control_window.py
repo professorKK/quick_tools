@@ -3,6 +3,7 @@ from __future__ import annotations
 import io
 import os
 import sys
+import time
 import tkinter as tk
 from dataclasses import replace
 from pathlib import Path
@@ -13,6 +14,7 @@ from PIL import Image
 from quicktools.plugins.screenshot.recent.store import RecentStore
 from quicktools.plugins.screenshot.settings import ScreenshotSettings
 from quicktools.plugins.screenshot.ui.control_window import ControlWindow
+from quicktools.plugins.screenshot.ui.widgets import ActionLink, NavItem
 
 pytestmark = pytest.mark.skipif(
     sys.platform != "win32" and not os.environ.get("DISPLAY"),
@@ -100,10 +102,66 @@ def _rows(control: ControlWindow):
     return control.recent_view._scroll.inner.winfo_children()
 
 
+def test_import_button_sits_between_home_and_about(
+    tmp_path: Path, monkeypatch
+) -> None:
+    store = RecentStore(tmp_path / "data", tmp_path / "shots")
+    try:
+        service = FakeService(store)
+        plugin = FakePlugin(service)
+        root = tk.Tk()
+        root.withdraw()
+        window = tk.Toplevel(root)
+        try:
+            control = ControlWindow(window, plugin)
+            control.pack(fill="both", expand=True)
+            root.update()
+
+            navs = [
+                child
+                for child in control.sidebar.winfo_children()
+                if isinstance(child, NavItem)
+            ]
+            assert [
+                item._text_label.cget("text") for item in navs
+            ] == ["首页", "导入图片", "关于", "设置"]
+
+            selected = [
+                str(tmp_path / "first.png"),
+                str(tmp_path / "second.png"),
+            ]
+            imported: list[str] = []
+            monkeypatch.setattr(
+                "quicktools.plugins.screenshot.ui.control_window."
+                "open_native_file_dialog",
+                lambda owner, opener, **options: tuple(selected),
+            )
+            monkeypatch.setattr(
+                plugin,
+                "import_images",
+                lambda paths: imported.extend(paths) or [object(), object()],
+                raising=False,
+            )
+
+            navs[1]._on_click()
+            root.update()
+
+            assert imported == selected
+            # Import is an action, not a page: the home page stays active.
+            assert control.current_page == "home"
+            assert control._toast_label is not None
+            assert "已导入 2 张图片" in control._toast_label.cget("text")
+        finally:
+            window.destroy()
+            root.destroy()
+    finally:
+        store.close()
+
+
 def test_home_page_mode_cards_are_compact_with_hover_text(
     tmp_path: Path,
 ) -> None:
-    store = RecentStore(tmp_path)
+    store = RecentStore(tmp_path / "data", tmp_path / "shots")
     try:
         service = FakeService(store)
         plugin = FakePlugin(service)
@@ -159,10 +217,108 @@ def test_home_page_mode_cards_are_compact_with_hover_text(
         store.close()
 
 
+def _action_links(widget: tk.Misc) -> list[ActionLink]:
+    links: list[ActionLink] = []
+    for child in widget.winfo_children():
+        if isinstance(child, ActionLink):
+            links.append(child)
+        links.extend(_action_links(child))
+    return links
+
+
+def test_recent_row_actions_are_open_edit_copy(
+    tmp_path: Path, monkeypatch
+) -> None:
+    store = RecentStore(tmp_path / "data", tmp_path / "shots")
+    try:
+        image = Image.new("RGB", (120, 80), (40, 80, 180))
+        output = io.BytesIO()
+        image.save(output, "PNG")
+        store.add_png(output.getvalue(), mode="region", source="test")
+        service = FakeService(store)
+        plugin = FakePlugin(service)
+        root = tk.Tk()
+        root.withdraw()
+        window = tk.Toplevel(root)
+        try:
+            control = ControlWindow(window, plugin)
+            control.pack(fill="both", expand=True)
+            root.update()
+
+            rows = _rows(control)
+            assert len(rows) == 1
+            links = _action_links(rows[0])
+            assert [
+                (link._icon_name, link._label.cget("text"))
+                for link in links
+            ] == [
+                ("folder", "打开"),
+                ("edit", "编辑"),
+                ("copy", "复制"),
+            ]
+
+            revealed: list[Path] = []
+            monkeypatch.setattr(
+                "quicktools.plugins.screenshot.ui.recent_view.reveal_in_file_manager",
+                lambda path: revealed.append(path),
+            )
+            edited: list[object] = []
+            monkeypatch.setattr(
+                service, "open_recent", lambda entry: edited.append(entry)
+            )
+
+            links[0]._command()
+            links[1]._command()
+            root.update()
+
+            assert revealed == [service.entries[0].path]
+            assert edited == [service.entries[0]]
+        finally:
+            window.destroy()
+            root.destroy()
+    finally:
+        store.close()
+
+
+def test_recent_view_renders_rows_in_chunks(tmp_path: Path) -> None:
+    store = RecentStore(tmp_path / "data", tmp_path / "shots")
+    try:
+        total = 30
+        for index in range(total):
+            image = Image.new("RGB", (80, 60), (index * 5, 80, 180))
+            output = io.BytesIO()
+            image.save(output, "PNG")
+            store.add_png(output.getvalue(), mode="region", source="test")
+        service = FakeService(store)
+        plugin = FakePlugin(service)
+        root = tk.Tk()
+        root.withdraw()
+        window = tk.Toplevel(root)
+        try:
+            control = ControlWindow(window, plugin)
+            control.pack(fill="both", expand=True)
+
+            # The first screen is synchronous; the remainder is scheduled so
+            # the window can appear before every thumbnail is decoded.
+            assert len(_rows(control)) == control.recent_view.INITIAL_ROW_COUNT
+
+            deadline = time.monotonic() + 5
+            while len(_rows(control)) < total and time.monotonic() < deadline:
+                root.update()
+                time.sleep(0.01)
+            root.update()
+            assert len(_rows(control)) == total
+        finally:
+            window.destroy()
+            root.destroy()
+    finally:
+        store.close()
+
+
 def test_control_window_scroll_search_footer_and_toast(
     tmp_path: Path,
 ) -> None:
-    store = RecentStore(tmp_path)
+    store = RecentStore(tmp_path / "data", tmp_path / "shots")
     try:
         for index in range(4):
             image = Image.new("RGB", (120, 80), (index * 40, 80, 180))

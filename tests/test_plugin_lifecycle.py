@@ -150,3 +150,63 @@ def test_background_plugin_starts_once_and_stops(
         except tk.TclError:
             pass
         root.destroy()
+
+
+def test_explicit_plugin_data_root_and_suspend(
+    tmp_path: Path, monkeypatch
+) -> None:
+    builtin = tmp_path / "builtin"
+    user = tmp_path / "user"
+    builtin.mkdir()
+    user.mkdir()
+    write_plugin(user, "bg", background=True)
+    loader = PluginLoader(user_plugins=user, builtin_plugins=builtin)
+    root = tk.Tk()
+    root.withdraw()
+    custom_root = tmp_path / "custom-root"
+    launcher = Launcher(
+        FakeApp(loader),
+        root,
+        window_states=WindowStateStore(tmp_path / "window_state.json"),
+        plugin_data_root=custom_root,
+    )
+    try:
+        calls = custom_root / "bg" / "calls.txt"
+        assert calls.read_text(encoding="utf-8").splitlines() == ["start"]
+
+        launcher.suspend_plugins_for_data_root_change()
+        assert launcher.plugin_window_count() == 0
+        assert calls.read_text(encoding="utf-8").splitlines() == [
+            "start",
+            "stop",
+        ]
+
+        # Hotkey/tray activity during a migration must not restart services
+        # inside the old data root.
+        launcher.reload_plugins()
+        meta = next(meta for meta in launcher.plugins if meta.id == "bg")
+        assert launcher.dispatch_plugin_action("bg", "noop") is False
+        launcher.open_plugin(meta)
+        root.update()
+        assert launcher.plugin_window_count() == 0
+        assert calls.read_text(encoding="utf-8").splitlines() == [
+            "start",
+            "stop",
+        ]
+
+        next_root = tmp_path / "next-root"
+        launcher.set_plugin_data_root(next_root)
+        launcher.resume_plugins()
+        launcher.reload_plugins()
+        next_calls = next_root / "bg" / "calls.txt"
+        assert next_calls.read_text(encoding="utf-8").splitlines() == ["start"]
+    finally:
+        try:
+            launcher.stop_background_plugins()
+        except Exception:
+            pass
+        try:
+            launcher.window.destroy()
+        except tk.TclError:
+            pass
+        root.destroy()

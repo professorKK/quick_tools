@@ -188,6 +188,14 @@ def _copy(ctx: _Pen) -> None:
     ctx.rounded_rect(9, 9, 20, 20, 2)
 
 
+def _edit(ctx: _Pen) -> None:
+    ctx.line(
+        [(4, 20), (5.5, 15), (16, 4.5), (19.5, 8), (9, 18.5)],
+        close=True,
+    )
+    ctx.line([(5.5, 15), (9, 18.5)])
+
+
 def _trash(ctx: _Pen) -> None:
     ctx.line([(4, 7), (20, 7)])
     ctx.line([(9, 7), (9, 4), (15, 4), (15, 7)])
@@ -206,6 +214,10 @@ def _star_filled(ctx: _Pen) -> None:
 
 def _chevron_right(ctx: _Pen) -> None:
     ctx.line([(9, 5), (16, 12), (9, 19)])
+
+
+def _chevron_left(ctx: _Pen) -> None:
+    ctx.line([(15, 5), (8, 12), (15, 19)])
 
 
 def _chevron_down(ctx: _Pen) -> None:
@@ -389,10 +401,12 @@ _DRAWERS = {
     "search": _search,
     "filter": _filter,
     "open": _open,
+    "edit": _edit,
     "copy": _copy,
     "trash": _trash,
     "star": _star,
     "star-filled": _star_filled,
+    "chevron-left": _chevron_left,
     "chevron-right": _chevron_right,
     "chevron-down": _chevron_down,
     "check": _check,

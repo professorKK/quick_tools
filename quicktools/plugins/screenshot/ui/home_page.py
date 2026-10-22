@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import tkinter as tk
 from typing import TYPE_CHECKING, Callable
 
@@ -21,6 +22,8 @@ from .widgets import ModeCard
 
 if TYPE_CHECKING:
     from ..plugin import ScreenshotPlugin
+
+log = logging.getLogger(__name__)
 
 _MODES = (
     (
@@ -139,7 +142,9 @@ class HomePage(tk.Frame):
                 icon_name=icon_name,
                 accent_bg=accent_bg,
                 accent_fg=accent_fg,
-                command=lambda value=action: self.plugin.handle_action(value),
+                command=lambda value=action, name=title: self._start_capture(
+                    name, value
+                ),
                 fonts=fonts,
                 icons=icons,
             )
@@ -163,6 +168,10 @@ class HomePage(tk.Frame):
         )
         self.recent_view.pack(fill="both", expand=True)
         self.refresh_hotkeys()
+
+    def _start_capture(self, name: str, action: str) -> None:
+        log.info("用户操作：点击截图模式卡“%s”（%s）", name, action)
+        self.plugin.handle_action(action)
 
     def refresh_hotkeys(self) -> None:
         available = bool(self.plugin.settings.hotkey_enabled) and not (

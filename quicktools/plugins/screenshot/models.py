@@ -132,6 +132,7 @@ class CaptureMode(str, Enum):
     WINDOW = "window"
     FREEFORM = "freeform"
     SCROLL = "scroll"
+    IMPORT = "import"
 
     @property
     def label(self) -> str:
@@ -140,6 +141,7 @@ class CaptureMode(str, Enum):
             CaptureMode.WINDOW: "窗口截图",
             CaptureMode.FREEFORM: "自由截图",
             CaptureMode.SCROLL: "滚动截图",
+            CaptureMode.IMPORT: "导入图片",
         }[self]
 
     @classmethod

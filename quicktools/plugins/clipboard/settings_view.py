@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import tkinter as tk
-from tkinter import messagebox, ttk
+from tkinter import ttk
 from typing import TYPE_CHECKING
 
 from quicktools.settings_widgets import (
@@ -24,6 +24,7 @@ from quicktools.ui_theme import (
     pick_fonts,
 )
 
+from .dialogs import ask_yes_no, show_error
 from .models import ClipboardError
 from .platform_utils import open_directory
 
@@ -283,11 +284,7 @@ class ClipboardSettingsPanel(tk.Frame):
             max_entries = int(self.entries_var.get())
             max_image_mb = int(self.image_mb_var.get())
         except ValueError:
-            messagebox.showerror(
-                "设置无效",
-                "容量必须是整数。",
-                parent=self.winfo_toplevel(),
-            )
+            show_error(self, "设置无效", "容量必须是整数。")
             return
         try:
             service.update_settings(
@@ -298,9 +295,7 @@ class ClipboardSettingsPanel(tk.Frame):
                 max_image_mb=max_image_mb,
             )
         except Exception as exc:
-            messagebox.showerror(
-                "保存设置失败", str(exc), parent=self.winfo_toplevel()
-            )
+            show_error(self, "保存设置失败", str(exc))
             return
         flash = getattr(self.view, "_flash", None)
         if callable(flash):
@@ -313,19 +308,17 @@ class ClipboardSettingsPanel(tk.Frame):
         service = self.service
         if service is None:
             return
-        if not messagebox.askyesno(
+        if not ask_yes_no(
+            self,
             "清空历史",
             "确定要清空全部剪贴板历史吗？此操作无法撤销。\n"
             "（不会删除任何原始文件）",
-            parent=self.winfo_toplevel(),
         ):
             return
         try:
             removed = service.clear_history()
         except Exception as exc:
-            messagebox.showerror(
-                "清空失败", str(exc), parent=self.winfo_toplevel()
-            )
+            show_error(self, "清空失败", str(exc))
             return
         if hasattr(self.view, "_selected_id"):
             self.view._selected_id = None
@@ -343,8 +336,6 @@ class ClipboardSettingsPanel(tk.Frame):
         try:
             open_directory(service.data_dir)
         except ClipboardError as exc:
-            messagebox.showerror(
-                "无法打开目录", str(exc), parent=self.winfo_toplevel()
-            )
+            show_error(self, "无法打开目录", str(exc))
             return
         self._status(f"已打开数据目录：{service.data_dir}")

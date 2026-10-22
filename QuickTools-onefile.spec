@@ -22,6 +22,7 @@ hiddenimports = [
     'quicktools.win32_window',
     'quicktools.plugin_settings',
     'quicktools.settings_widgets',
+    'quicktools.modal_dialogs',
     'quicktools.ui_icons',
     'quicktools.win32_hotkey',
     'quicktools.win32_focus',

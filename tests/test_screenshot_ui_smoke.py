@@ -9,7 +9,10 @@ import pytest
 from PIL import Image
 
 from quicktools.plugins.screenshot.editor.annotations import Tool
-from quicktools.plugins.screenshot.editor.editor_window import CaptureEditor
+from quicktools.plugins.screenshot.editor.editor_window import (
+    CaptureEditor,
+    NavigationTarget,
+)
 from quicktools.plugins.screenshot.models import (
     CapturedImage,
     CaptureMode,
@@ -920,3 +923,414 @@ def test_editor_move_resize_and_text(root: tk.Tk) -> None:
     editor.mark_exported()
     editor.close()
     root.update()
+
+
+def test_editor_cement_background_and_edge_arrows(root: tk.Tk) -> None:
+    editor = CaptureEditor(
+        root,
+        Image.new("RGB", (500, 300), "white"),
+        ScreenshotSettings(),
+        on_copy=lambda _image: None,
+        on_save=lambda _image, _path: None,
+        on_close=lambda _done: None,
+        on_navigate=lambda _direction: None,
+        nav_has_newer=True,
+        nav_has_older=True,
+    )
+    editor.deiconify()
+    root.update()
+    try:
+        assert editor._canvas.cget("bg") == "#d8d5cf"
+        assert editor._canvas.canvas.cget("bg") == "#d8d5cf"
+        # The real pointer may already sit over an edge when the editor maps.
+        editor._hide_nav_arrows()
+        root.update()
+        assert editor._nav_buttons[-1].place_info() == {}
+        assert editor._nav_buttons[1].place_info() == {}
+
+        editor._on_nav_motion(SimpleNamespace(x=2, y=10))
+        assert editor._nav_buttons[-1].place_info() != {}
+        assert editor._nav_buttons[1].place_info() == {}
+
+        width = editor._canvas.canvas.winfo_width()
+        editor._on_nav_motion(SimpleNamespace(x=width - 2, y=10))
+        assert editor._nav_buttons[-1].place_info() == {}
+        assert editor._nav_buttons[1].place_info() != {}
+
+        editor._on_nav_motion(SimpleNamespace(x=width // 2, y=10))
+        assert editor._nav_buttons[-1].place_info() == {}
+        assert editor._nav_buttons[1].place_info() == {}
+    finally:
+        editor.close()
+        root.update()
+
+
+def test_editor_navigation_flushes_and_swaps_document(
+    root: tk.Tk, monkeypatch
+) -> None:
+    autosaved: list[Image.Image] = []
+    calls: list[int] = []
+
+    def navigate(direction: int):
+        calls.append(direction)
+        assert autosaved
+        return NavigationTarget(
+            Image.new("RGB", (300, 200), "white"), "test-entry", False, True
+        )
+
+    editor = CaptureEditor(
+        root,
+        Image.new("RGB", (120, 80), "white"),
+        ScreenshotSettings(),
+        on_copy=lambda _image: None,
+        on_save=lambda _image, _path: None,
+        on_close=lambda _done: None,
+        on_autosave=autosaved.append,
+        on_navigate=navigate,
+        nav_has_newer=True,
+        nav_has_older=True,
+    )
+    editor.withdraw()
+    root.update()
+    asked: list[str] = []
+    monkeypatch.setattr(
+        "quicktools.plugins.screenshot.editor.editor_window.messagebox.askyesno",
+        lambda *args, **kwargs: asked.append(str(args)) or True,
+    )
+
+    editor.document.add_number(Point(10, 10), editor.edit_style)
+    editor._on_document_changed()
+    assert editor._autosave_job is not None
+
+    editor._navigate(1)
+    assert calls == [1]
+    assert autosaved
+    assert editor.document.image_size == (300, 200)
+    assert editor.document.annotations == []
+    assert editor._canvas.document is editor.document
+    assert editor._canvas._fit_mode is True
+    assert editor._size_var.get() == "300 × 200"
+    assert editor._nav_has_newer is False
+    assert editor._nav_has_older is True
+
+    editor.close()
+    root.update()
+    assert asked == []
+
+
+def test_editor_navigation_aborts_when_autosave_fails(root: tk.Tk) -> None:
+    calls: list[int] = []
+
+    def failing_autosave(_image: Image.Image) -> None:
+        raise RuntimeError("disk full")
+
+    editor = CaptureEditor(
+        root,
+        Image.new("RGB", (120, 80), "white"),
+        ScreenshotSettings(),
+        on_copy=lambda _image: None,
+        on_save=lambda _image, _path: None,
+        on_close=lambda _done: None,
+        on_autosave=failing_autosave,
+        on_navigate=lambda direction: calls.append(direction),
+        nav_has_newer=True,
+        nav_has_older=True,
+    )
+    editor.withdraw()
+    root.update()
+
+    editor.document.add_number(Point(10, 10), editor.edit_style)
+    editor._on_document_changed()
+    editor._navigate(1)
+
+    assert calls == []
+    assert editor.document.image_size == (120, 80)
+    assert len(editor.document.annotations) == 1
+    assert "自动保存失败" in editor._status_var.get()
+    editor._done = True
+    editor.mark_exported()
+    editor.close()
+    root.update()
+
+
+def test_editor_navigation_disabled_at_edges(root: tk.Tk) -> None:
+    calls: list[int] = []
+    editor = CaptureEditor(
+        root,
+        Image.new("RGB", (120, 80), "white"),
+        ScreenshotSettings(),
+        on_copy=lambda _image: None,
+        on_save=lambda _image, _path: None,
+        on_close=lambda _done: None,
+        on_navigate=lambda direction: calls.append(direction),
+        nav_has_newer=False,
+        nav_has_older=False,
+    )
+    editor.withdraw()
+    root.update()
+    try:
+        editor._navigate(-1)
+        editor._navigate(1)
+        assert calls == []
+        for button in editor._nav_buttons.values():
+            assert button._enabled is False
+            button._on_click()
+            button._on_release()
+        assert calls == []
+    finally:
+        editor.close()
+        root.update()
+
+
+def test_modal_dialog_hides_and_restores_frameless_windows(root: tk.Tk) -> None:
+    if sys.platform == "win32":
+        pytest.skip("X11 dialog stacking workaround")
+    from quicktools.modal_dialogs import run_modal_dialog
+
+    owner = tk.Toplevel(root)
+    owner.overrideredirect(True)
+    owner.geometry("200x100+50+50")
+    owner.deiconify()
+    root.update()
+    seen: dict = {}
+
+    def action(**kwargs):
+        seen["parent"] = kwargs.get("parent")
+        seen["mapped"] = bool(owner.winfo_ismapped())
+        return "ok"
+
+    try:
+        assert run_modal_dialog(owner, action) == "ok"
+        root.update()
+        assert seen["parent"] is root
+        assert seen["mapped"] is False
+        assert owner.winfo_ismapped()
+    finally:
+        owner.destroy()
+        root.update()
+
+
+def _sticker_editor(root: tk.Tk) -> tuple[CaptureEditor, object]:
+    editor = CaptureEditor(
+        root,
+        Image.new("RGB", (600, 400), "white"),
+        ScreenshotSettings(),
+        on_copy=lambda _image: None,
+        on_save=lambda _image, _path: None,
+        on_close=lambda _done: None,
+    )
+    editor.deiconify()
+    root.update()
+    sticker = Image.new("RGBA", (40, 30), (0, 200, 0, 255))
+    annotation = editor.document.add_sticker(
+        sticker, Point(300, 200), editor.edit_style
+    )
+    editor.document.select(annotation.id)
+    editor._canvas.set_tool(Tool.SELECT, keep_selection=True)
+    root.update()
+    return editor, annotation
+
+
+def _sticker_boxes(editor: CaptureEditor):
+    canvas = editor._canvas.canvas
+    image_box = None
+    selection = None
+    for item in canvas.find_all():
+        tags = canvas.gettags(item)
+        if canvas.type(item) == "image" and "annotation" in tags:
+            image_box = canvas.bbox(item)
+        if (
+            canvas.type(item) == "rectangle"
+            and "selection" in tags
+            and selection is None
+        ):
+            coords = canvas.coords(item)
+            if coords[2] - coords[0] > 10:
+                selection = tuple(coords)
+    return image_box, selection
+
+
+def test_editor_sticker_frame_matches_image_after_resize(root: tk.Tk) -> None:
+    editor, annotation = _sticker_editor(root)
+    canvas = editor._canvas
+    try:
+        se = canvas._display_point(
+            Point(annotation.bounds.right, annotation.bounds.bottom)
+        )
+        canvas._on_press(SimpleNamespace(x=se[0], y=se[1]))
+        canvas._on_motion(SimpleNamespace(x=se[0] + 80, y=se[1] + 30))
+        canvas._on_release(SimpleNamespace(x=se[0] + 80, y=se[1] + 30))
+        root.update()
+
+        image_box, selection = _sticker_boxes(editor)
+        assert image_box is not None and selection is not None
+        assert abs(image_box[0] - selection[0]) <= 2
+        assert abs(image_box[1] - selection[1]) <= 2
+        assert abs(image_box[2] - selection[2]) <= 2
+        assert abs(image_box[3] - selection[3]) <= 2
+        assert annotation.bounds.width > 40
+    finally:
+        editor._done = True
+        editor.mark_exported()
+        editor.close()
+        root.update()
+
+
+def test_editor_sticker_can_resize_by_dragging_frame_edge(root: tk.Tk) -> None:
+    editor, annotation = _sticker_editor(root)
+    canvas = editor._canvas
+    try:
+        width_before = annotation.bounds.width
+        # Click the top dashed edge away from the small corner/edge handles.
+        edge_x = annotation.bounds.left + annotation.bounds.width / 4
+        edge = canvas._display_point(
+            Point(edge_x, annotation.bounds.top)
+        )
+        canvas._on_press(SimpleNamespace(x=edge[0], y=edge[1]))
+        canvas._on_motion(SimpleNamespace(x=edge[0], y=edge[1] + 10))
+        canvas._on_release(SimpleNamespace(x=edge[0], y=edge[1] + 10))
+        root.update()
+        assert annotation.bounds.width == width_before
+        assert annotation.bounds.height < 30
+    finally:
+        editor._done = True
+        editor.mark_exported()
+        editor.close()
+        root.update()
+
+
+def test_editor_selected_sticker_rotates_and_flips(root: tk.Tk) -> None:
+    editor, annotation = _sticker_editor(root)
+    canvas = editor._canvas
+    try:
+        width, height = annotation.bounds.width, annotation.bounds.height
+        canvas.rotate(True)
+        root.update()
+        assert annotation.image.size == (height, width)
+        assert (annotation.bounds.width, annotation.bounds.height) == (
+            height,
+            width,
+        )
+        assert "旋转" in editor._status_var.get()
+
+        canvas.flip(True)
+        root.update()
+        assert "翻转" in editor._status_var.get()
+    finally:
+        editor._done = True
+        editor.mark_exported()
+        editor.close()
+        root.update()
+
+
+def test_editor_nav_hover_ignores_tk_dialog_widget(
+    root: tk.Tk, monkeypatch
+) -> None:
+    editor = CaptureEditor(
+        root,
+        Image.new("RGB", (120, 80), "white"),
+        ScreenshotSettings(),
+        on_copy=lambda _image: None,
+        on_save=lambda _image, _path: None,
+        on_close=lambda _done: None,
+        on_navigate=lambda _direction: None,
+        nav_has_newer=True,
+        nav_has_older=True,
+    )
+    editor.withdraw()
+    root.update()
+
+    def fail(_x, _y):
+        raise KeyError("__tk_filedialog")
+
+    monkeypatch.setattr(editor, "winfo_containing", fail)
+    try:
+        editor._check_nav_hover()
+        assert editor._nav_visible == {-1: False, 1: False}
+    finally:
+        editor.close()
+        root.update()
+
+
+def test_editor_sticker_tool_opens_picker_and_inserts_center(
+    root: tk.Tk, monkeypatch, tmp_path
+) -> None:
+    import quicktools.plugins.screenshot.editor.canvas as canvas_module
+
+    sticker_path = tmp_path / "sticker.png"
+    Image.new("RGBA", (80, 40), (0, 200, 0, 255)).save(sticker_path)
+    seen: dict = {}
+
+    def fake_dialog(owner, opener, **options):
+        seen["owner"] = owner
+        seen["opener"] = opener
+        seen["title"] = options.get("title")
+        return str(sticker_path)
+
+    monkeypatch.setattr(canvas_module, "open_native_file_dialog", fake_dialog)
+    editor = CaptureEditor(
+        root,
+        Image.new("RGB", (600, 400), "white"),
+        ScreenshotSettings(),
+        on_copy=lambda _image: None,
+        on_save=lambda _image, _path: None,
+        on_close=lambda _done: None,
+    )
+    editor.deiconify()
+    root.update()
+    try:
+        editor.toolbar._select_tool(Tool.STICKER)
+        root.update()
+        assert seen["owner"] is editor._canvas
+        assert seen["title"] == "选择贴纸图片"
+        assert editor._canvas.tool is Tool.SELECT
+
+        stickers = [
+            item
+            for item in editor.document.annotations
+            if item.tool is Tool.STICKER
+        ]
+        assert len(stickers) == 1
+        sticker = stickers[0]
+        assert editor.document.selected_id == sticker.id
+        assert abs(sticker.bounds.center.x - 300) <= 1
+        assert abs(sticker.bounds.center.y - 200) <= 1
+        assert editor.toolbar._tool_buttons[Tool.SELECT]._active is True
+        assert editor.toolbar._tool_buttons[Tool.STICKER]._active is False
+    finally:
+        editor._done = True
+        editor.mark_exported()
+        editor.close()
+        root.update()
+
+
+def test_editor_sticker_tool_cancel_restores_select(
+    root: tk.Tk, monkeypatch
+) -> None:
+    import quicktools.plugins.screenshot.editor.canvas as canvas_module
+
+    monkeypatch.setattr(
+        canvas_module, "open_native_file_dialog", lambda *_a, **_k: ""
+    )
+    editor = CaptureEditor(
+        root,
+        Image.new("RGB", (600, 400), "white"),
+        ScreenshotSettings(),
+        on_copy=lambda _image: None,
+        on_save=lambda _image, _path: None,
+        on_close=lambda _done: None,
+    )
+    editor.deiconify()
+    root.update()
+    try:
+        editor.toolbar._select_tool(Tool.STICKER)
+        root.update()
+        assert editor.document.annotations == []
+        assert editor._canvas.tool is Tool.SELECT
+        assert "取消添加贴纸" in editor._status_var.get()
+        assert editor.toolbar._tool_buttons[Tool.SELECT]._active is True
+    finally:
+        editor._done = True
+        editor.mark_exported()
+        editor.close()
+        root.update()

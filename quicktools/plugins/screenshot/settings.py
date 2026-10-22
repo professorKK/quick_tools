@@ -62,6 +62,8 @@ class ScreenshotSettings:
     jpeg_quality: int = 92
     auto_copy: bool = False
     auto_save: bool = False
+    # Kept for settings.json compatibility. The file-backed recent list never
+    # auto-deletes screenshots, so these limits are no longer enforced.
     recent_limit: int = 100
     recent_max_mb: int = 500
     hide_delay_ms: int = 220
@@ -73,6 +75,7 @@ class ScreenshotSettings:
     scroll_max_height: int = 20000
     scroll_ignore_top: int = 0
     scroll_ignore_bottom: int = 0
+    window_margin_px: int = 0
 
     def resolved_save_dir(self) -> Path:
         raw = (self.save_dir or "").strip()
@@ -101,6 +104,7 @@ class ScreenshotSettings:
             scroll_max_height=max(1000, min(100000, int(self.scroll_max_height))),
             scroll_ignore_top=max(0, int(self.scroll_ignore_top)),
             scroll_ignore_bottom=max(0, int(self.scroll_ignore_bottom)),
+            window_margin_px=max(0, min(500, int(self.window_margin_px))),
         )
 
     def to_mapping(self) -> dict[str, Any]:
@@ -124,6 +128,7 @@ class ScreenshotSettings:
             "scroll_max_height": self.scroll_max_height,
             "scroll_ignore_top": self.scroll_ignore_top,
             "scroll_ignore_bottom": self.scroll_ignore_bottom,
+            "window_margin_px": self.window_margin_px,
         }
 
     @classmethod
@@ -154,6 +159,7 @@ class ScreenshotSettings:
             scroll_max_height=_int(data.get("scroll_max_height"), 20000),
             scroll_ignore_top=_int(data.get("scroll_ignore_top"), 0),
             scroll_ignore_bottom=_int(data.get("scroll_ignore_bottom"), 0),
+            window_margin_px=_int(data.get("window_margin_px"), 0),
         ).normalized()
 
 

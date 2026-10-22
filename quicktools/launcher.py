@@ -5,6 +5,7 @@ from __future__ import annotations
 import sys
 import time
 import tkinter as tk
+from pathlib import Path
 from tkinter import messagebox
 from typing import TYPE_CHECKING, Callable
 
@@ -93,9 +94,17 @@ class Launcher:
         root: tk.Tk,
         *,
         window_states: WindowStateStore | None = None,
+        plugin_data_root: Path | None = None,
     ) -> None:
         self.app = app
         self.root = root
+        self.plugin_data_root = (
+            Path(plugin_data_root) if plugin_data_root is not None else None
+        )
+        # Set while plugin data is being moved. Opening/restarting a plugin in
+        # that window would recreate databases and files inside the old root
+        # while it is being renamed or copied.
+        self._plugins_suspended = False
         self.fonts: Fonts = pick_fonts(root)
         self.loader = app.loader
         self.plugins: list[PluginMeta] = []
@@ -577,12 +586,40 @@ class Launcher:
     def reload_plugins(self) -> tuple[int, list[str]]:
         self.plugins = self.loader.scan()
         self._errors = list(self.loader.errors)
-        self._sync_background_plugins()
+        if not self._plugins_suspended:
+            self._sync_background_plugins()
         self._refresh_cards()
         return len(self.plugins), list(self._errors)
 
+    def set_plugin_data_root(self, root: Path | None) -> None:
+        self.plugin_data_root = Path(root) if root is not None else None
+
+    def resume_plugins(self) -> None:
+        """Allow plugin windows/services again after a data migration."""
+        self._plugins_suspended = False
+
+    def suspend_plugins_for_data_root_change(self) -> None:
+        """Close every plugin window/service before moving their data."""
+        self._plugins_suspended = True
+        self.flush_window_states()
+        for plugin_id, window in list(self._plugin_windows.items()):
+            self._cancel_plugin_focus_job(window)
+            self._cancel_window_state_job(plugin_id)
+            if self._exists(window):
+                try:
+                    window.destroy()
+                except tk.TclError:
+                    pass
+        self._plugin_windows.clear()
+        self._plugin_frames.clear()
+        self.stop_background_plugins()
+        self._refresh_cards()
+
     def _make_context(self, meta: PluginMeta) -> PluginContext:
-        data_dir = paths.plugin_data_dir(meta.id)
+        if self.plugin_data_root is None:
+            data_dir = paths.plugin_data_dir(meta.id)
+        else:
+            data_dir = paths.plugin_data_dir(meta.id, self.plugin_data_root)
         data_dir.mkdir(parents=True, exist_ok=True)
         actions = PluginActions(
             post_action=lambda action, mid=meta.id: self._post_plugin_action(
@@ -638,6 +675,11 @@ class Launcher:
 
     def dispatch_plugin_action(self, plugin_id: str, action: str) -> bool:
         """Dispatch an action to a running background plugin instance."""
+        if self._plugins_suspended:
+            log.warning(
+                "插件数据迁移进行中，忽略插件动作：%s %s", plugin_id, action
+            )
+            return False
         meta = next((item for item in self.plugins if item.id == plugin_id), None)
         if meta is None:
             log.warning("忽略未知插件的动作：%s %s", plugin_id, action)
@@ -810,6 +852,9 @@ class Launcher:
             return False
 
     def open_plugin(self, meta: PluginMeta) -> None:
+        if self._plugins_suspended:
+            log.warning("插件数据迁移进行中，暂不打开插件：%s", meta.id)
+            return
         existing = self._plugin_windows.get(meta.id)
         if existing is not None and self._exists(existing):
             self.hide()

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import time
 import tkinter as tk
 from datetime import datetime
 from typing import TYPE_CHECKING, Callable
@@ -17,6 +18,7 @@ from quicktools.ui_theme import (
     MUTED,
     TEXT,
     pick_fonts,
+    reveal_in_file_manager,
 )
 
 from ..models import CaptureError, CaptureMode
@@ -46,6 +48,10 @@ _STAR_COLOR = "#f59e0b"
 
 
 class RecentView(tk.Frame):
+    INITIAL_ROW_COUNT = 8
+    ROW_CHUNK_BUDGET_SECONDS = 0.025
+    ROW_CHUNK_DELAY_MS = 10
+
     def __init__(
         self,
         master: tk.Misc,
@@ -64,6 +70,10 @@ class RecentView(tk.Frame):
         self._search_job: str | None = None
         self._filter_var = tk.StringVar(value="all")
         self._filter_button: FlatButton | None = None
+        self._entries: list = []
+        self._render_job: str | None = None
+        self._render_generation = 0
+        self._render_cursor = 0
         self._build()
         self._search_trace = self._search_var.trace_add(
             "write", self._on_search_changed
@@ -140,6 +150,9 @@ class RecentView(tk.Frame):
 
     def _refresh_from_search(self) -> None:
         self._search_job = None
+        query = self._search_var.get().strip()
+        if query:
+            log.info("用户操作：搜索最近截图 %r", query)
         self.refresh()
         self._scroll.scroll_to_top()
 
@@ -156,8 +169,14 @@ class RecentView(tk.Frame):
             except tk.TclError:
                 pass
             self._search_job = None
+        self._cancel_pending_render()
 
     def _on_filter_changed(self) -> None:
+        log.info(
+            "用户操作：筛选最近截图，筛选=%s，搜索=%r",
+            self._filter_var.get(),
+            self._search_var.get().strip(),
+        )
         self.refresh()
         self._scroll.scroll_to_top()
 
@@ -171,7 +190,38 @@ class RecentView(tk.Frame):
         mode = value if value in _MODE_VALUES else None
         return favorite, mode
 
+    def _cancel_pending_render(self) -> None:
+        self._render_generation += 1
+        job = self._render_job
+        self._render_job = None
+        if job is not None:
+            try:
+                self.after_cancel(job)
+            except tk.TclError:
+                pass
+
+    def _render_more_rows(self, generation: int) -> None:
+        self._render_job = None
+        if generation != self._render_generation or not self.winfo_exists():
+            return
+        deadline = time.perf_counter() + self.ROW_CHUNK_BUDGET_SECONDS
+        total = len(self._entries)
+        cursor = self._render_cursor
+        while cursor < total:
+            row = self._build_row(self._entries[cursor])
+            self._scroll.bind_wheel(row)
+            cursor += 1
+            if time.perf_counter() >= deadline:
+                break
+        self._render_cursor = cursor
+        if cursor < total:
+            self._render_job = self.after(
+                self.ROW_CHUNK_DELAY_MS,
+                lambda: self._render_more_rows(generation),
+            )
+
     def refresh(self) -> None:
+        self._cancel_pending_render()
         for child in self._scroll.inner.winfo_children():
             child.destroy()
         self._photos.clear()
@@ -182,15 +232,37 @@ class RecentView(tk.Frame):
             entries = service.recent_entries(
                 limit=500, favorite=favorite, mode=mode
             )
+        else:
+            log.warning("最近截图：截图服务未启动，无法刷新列表")
         query = self._search_var.get().strip().casefold()
         if query:
             entries = [entry for entry in entries if self._matches(entry, query)]
+        preview_ids = [entry.id for entry in entries[:30]]
+        log.info(
+            "最近截图：刷新列表，显示 %d 条，筛选=%s，搜索=%r，"
+            "记录 id=%s%s",
+            len(entries),
+            self._filter_var.get(),
+            query,
+            preview_ids,
+            "…" if len(entries) > len(preview_ids) else "",
+        )
+        self._entries = entries
+        self._render_cursor = 0
         if not entries:
             self._show_empty_state(query)
             return
-        for entry in entries:
+        initial = min(len(entries), self.INITIAL_ROW_COUNT)
+        for entry in entries[:initial]:
             row = self._build_row(entry)
             self._scroll.bind_wheel(row)
+        self._render_cursor = initial
+        if initial < len(entries):
+            generation = self._render_generation
+            self._render_job = self.after(
+                self.ROW_CHUNK_DELAY_MS,
+                lambda: self._render_more_rows(generation),
+            )
 
     def _show_empty_state(self, query: str) -> None:
         if query:
@@ -220,18 +292,14 @@ class RecentView(tk.Frame):
         stamp = datetime.fromtimestamp(entry.updated_at).strftime(
             "%Y-%m-%d %H:%M"
         )
-        saved_name = ""
-        if entry.saved_path:
-            saved_name = entry.saved_path.replace("\\", "/").rsplit("/", 1)[-1]
         haystack = " ".join(
             [
                 mode_label,
                 f"{entry.width} x {entry.height}",
                 f"{entry.width}×{entry.height}",
                 stamp,
-                saved_name,
-                entry.source or "",
-                entry.png_path,
+                entry.name,
+                str(entry.path),
             ]
         ).casefold()
         return query in haystack
@@ -309,9 +377,9 @@ class RecentView(tk.Frame):
         actions = tk.Frame(row, bg=BG)
         actions.pack(side="right", padx=(4, 4))
         for icon_name, text, command in (
-            ("open", "打开", lambda e=entry: self._open(e)),
+            ("folder", "打开", lambda e=entry: self._reveal(e)),
+            ("edit", "编辑", lambda e=entry: self._edit(e)),
             ("copy", "复制", lambda e=entry: self._copy(e)),
-            ("trash", "删除", lambda e=entry: self._delete(e)),
         ):
             ActionLink(
                 actions,
@@ -337,7 +405,12 @@ class RecentView(tk.Frame):
             thumb.thumbnail((112, 72), Image.LANCZOS)
             photo = ImageTk.PhotoImage(thumb, master=self)
         except Exception:
-            log.debug("读取截图缩略图失败", exc_info=True)
+            log.warning(
+                "读取截图缩略图失败：记录 id=%s，文件=%s",
+                entry.id,
+                path,
+                exc_info=True,
+            )
             return None
         self._photos.append(photo)
         return photo
@@ -347,22 +420,50 @@ class RecentView(tk.Frame):
         if self.on_toast is not None:
             self.on_toast(message, error)
 
-    def _open(self, entry) -> None:
-        service = self.plugin.service
-        if service is not None:
-            service.open_recent(entry)
+    @staticmethod
+    def _describe(entry) -> str:
+        return (
+            f"id={entry.id} 模式={entry.mode or '未知'} "
+            f"尺寸={entry.width}×{entry.height} "
+            f"收藏={bool(entry.favorite)} "
+            f"文件={entry.path}"
+        )
 
-    def _copy(self, entry) -> None:
+    def _reveal(self, entry) -> None:
+        log.info("用户操作：在文件管理器中定位最近截图 %s", self._describe(entry))
+        try:
+            reveal_in_file_manager(entry.path)
+        except Exception as exc:
+            log.exception("定位最近截图文件失败：%s", entry.path)
+            self._toast(f"无法打开文件管理器：{exc}", True)
+            return
+        self._toast("已打开截图所在位置")
+
+    def _edit(self, entry) -> None:
+        log.info("用户操作：最近截图列表编辑图片 %s", self._describe(entry))
         service = self.plugin.service
         if service is None:
+            log.warning("编辑最近截图失败：截图服务未启动")
+            return
+        service.open_recent(entry)
+
+    def _copy(self, entry) -> None:
+        log.info("用户操作：最近截图列表复制图片 %s", self._describe(entry))
+        service = self.plugin.service
+        if service is None:
+            log.warning("复制最近截图失败：截图服务未启动")
             return
         service.copy_recent(entry)
         status = service.last_status or "截图已复制到剪贴板"
         self._toast(status, "失败" in status or "不可用" in status)
 
     def _toggle_favorite(self, entry) -> None:
+        log.info(
+            "用户操作：切换最近截图收藏 %s", self._describe(entry)
+        )
         service = self.plugin.service
         if service is None:
+            log.warning("收藏最近截图失败：截图服务未启动")
             return
         updated = service.toggle_recent_favorite(entry)
         self.refresh()
@@ -372,16 +473,14 @@ class RecentView(tk.Frame):
             status = getattr(service, "last_status", "")
             self._toast(status or "收藏失败", True)
 
-    def _delete(self, entry) -> None:
-        service = self.plugin.service
-        if service is not None:
-            service.delete_recent(entry)
-        self.refresh()
-        self._toast("已删除截图记录")
-
     def _clear(self) -> None:
+        log.info("用户操作：最近截图列表点击清空全部")
         service = self.plugin.service
-        if service is not None:
-            service.clear_recent()
+        if service is None:
+            log.warning("清空最近截图失败：截图服务未启动")
+            self._toast("截图服务未启动", True)
+            return
+        service.clear_recent()
         self.refresh()
-        self._toast("已清空最近截图")
+        status = service.last_status or "已清空最近截图"
+        self._toast(status, "失败" in status or "未删除" in status)

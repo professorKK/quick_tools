@@ -43,8 +43,22 @@ def user_plugins_dir() -> Path:
     return data_dir() / "plugins"
 
 
-def plugin_data_dir(plugin_id: str) -> Path:
-    return data_dir() / "plugin_data" / plugin_id
+def default_plugin_data_root() -> Path:
+    return data_dir() / "plugin_data"
+
+
+def plugin_data_root(root: str | Path | None = None) -> Path:
+    """Resolve the plugin data root; blank means the default location."""
+    raw = str(root).strip() if root is not None else ""
+    if not raw:
+        return default_plugin_data_root()
+    return Path(raw).expanduser()
+
+
+def plugin_data_dir(
+    plugin_id: str, root: str | Path | None = None
+) -> Path:
+    return plugin_data_root(root) / plugin_id
 
 
 def log_file() -> Path:

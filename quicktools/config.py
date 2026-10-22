@@ -136,19 +136,34 @@ class HotkeySpec:
 @dataclass
 class AppSettings:
     hotkey: HotkeySpec
+    # Empty means the platform default plugin_data directory. A non-empty
+    # value is the parent directory containing all plugins' data folders.
+    plugin_data_root: str = ""
 
     @classmethod
     def default(cls) -> "AppSettings":
         return cls(HotkeySpec.default())
 
     def to_mapping(self) -> dict[str, Any]:
-        return {"version": 1, "hotkey": self.hotkey.to_mapping()}
+        return {
+            "version": 1,
+            "hotkey": self.hotkey.to_mapping(),
+            "plugin_data_root": self.plugin_data_root,
+        }
 
     @classmethod
     def from_mapping(cls, data: Any) -> "AppSettings":
         if not isinstance(data, dict):
             raise ValueError("配置文件根节点必须是对象")
-        return cls(HotkeySpec.from_mapping(data.get("hotkey")))
+        raw_root = data.get("plugin_data_root")
+        return cls(
+            HotkeySpec.from_mapping(data.get("hotkey")),
+            plugin_data_root=(
+                raw_root.strip()
+                if isinstance(raw_root, str) and raw_root.strip()
+                else ""
+            ),
+        )
 
 
 def load_settings(path: Path | None = None) -> AppSettings:

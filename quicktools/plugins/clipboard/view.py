@@ -6,7 +6,6 @@ import logging
 import time
 import tkinter as tk
 from pathlib import Path
-from tkinter import messagebox
 from typing import Callable
 
 from PIL import Image, ImageTk
@@ -27,6 +26,7 @@ from quicktools.ui_theme import (
     pick_fonts,
 )
 
+from .dialogs import ask_yes_no, show_error
 from .models import (
     ClipboardEntry,
     ClipboardError,
@@ -54,7 +54,6 @@ from .widgets import (
     TypeBadge,
     bind_wheel_recursive,
     horizontal_divider,
-    vertical_divider,
 )
 
 log = logging.getLogger(__name__)
@@ -68,6 +67,9 @@ class ClipboardView(tk.Frame):
     INITIAL_CARD_COUNT = 10
     CARD_CHUNK_BUDGET_SECONDS = 0.025
     CARD_CHUNK_DELAY_MS = 10
+    PAGE_SIZE = 200
+    ADD_DEBOUNCE_MS = 120
+    REFRESH_DEBOUNCE_MS = 150
 
     def __init__(
         self,
@@ -105,21 +107,50 @@ class ClipboardView(tk.Frame):
         self._thumb_photo = None
         self._counts = {"all": 0, "text": 0, "image": 0, "files": 0}
         self._last_status_level = "ok"
+        self._has_more = False
+        self._load_more_frame: tk.Frame | None = None
+        self._pending_add_ids: list[int] = []
+        self._add_job: str | None = None
+        self._refresh_job: str | None = None
+        self._loading_more = False
 
-        self.grid_rowconfigure(0, weight=1)
-        self.grid_columnconfigure(0, weight=0, minsize=232)
-        self.grid_columnconfigure(1, weight=0)
-        self.grid_columnconfigure(2, weight=3, minsize=360)
-        self.grid_columnconfigure(3, weight=0)
-        self.grid_columnconfigure(4, weight=2, minsize=340)
-
-        self._build_sidebar().grid(row=0, column=0, sticky="nsew")
-        vertical_divider(self).grid(row=0, column=1, sticky="ns")
-        self._build_list_panel().grid(row=0, column=2, sticky="nsew")
-        vertical_divider(self).grid(row=0, column=3, sticky="ns")
-        self._build_detail_panel().grid(row=0, column=4, sticky="nsew")
+        # Three resizable panes: sidebar / history / detail. The sidebars stay
+        # fixed when the window grows; the two content panes share extra space.
+        self.paned = tk.PanedWindow(
+            self,
+            orient="horizontal",
+            sashwidth=5,
+            sashrelief="flat",
+            sashcursor="sb_h_double_arrow",
+            bd=0,
+            bg=BORDER,
+            opaqueresize=True,
+        )
+        self.paned.pack(fill="both", expand=True)
+        self.paned.add(
+            self._build_sidebar(),
+            minsize=220,
+            width=232,
+            stretch="never",
+        )
+        self.paned.add(
+            self._build_list_panel(),
+            minsize=340,
+            width=500,
+            stretch="always",
+        )
+        self.paned.add(
+            self._build_detail_panel(),
+            minsize=320,
+            width=430,
+            stretch="always",
+        )
 
         if self.service is not None:
+            try:
+                self.service.maintenance(force=True)
+            except Exception:
+                log.exception("清理剪贴板数据失败")
             self.service.add_listener(self._listener)
         self.bind("<Destroy>", self._on_destroy, add="+")
         self._bind_keys()
@@ -349,6 +380,8 @@ class ClipboardView(tk.Frame):
     # --------------------------------------------------------------- refresh
     def refresh(self, reset_scroll: bool = False, *_args) -> None:
         self._search_job = None
+        self._cancel_add_job()
+        self._cancel_refresh_job()
         if self._detached:
             return
         try:
@@ -359,6 +392,7 @@ class ClipboardView(tk.Frame):
 
         if self.service is None:
             self._entries = []
+            self._has_more = False
             self._selected_id = None
             self._update_counts()
             self._update_nav_selection()
@@ -369,14 +403,24 @@ class ClipboardView(tk.Frame):
 
         try:
             self._counts = self.service.counts()
-            self._entries = self.service.entries(
+            fetch_limit = (
+                self.PAGE_SIZE + 1
+                if reset_scroll
+                else max(self.PAGE_SIZE, len(self._entries)) + 1
+            )
+            fetched = self.service.entries(
                 self._filter_kind,
                 self.search.get(),
                 newest_first=self._newest_first,
+                limit=fetch_limit,
+                offset=0,
             )
+            self._has_more = len(fetched) >= fetch_limit
+            self._entries = fetched[: fetch_limit - 1]
         except Exception:
             log.exception("刷新剪贴板列表失败")
             self._entries = []
+            self._has_more = False
         self._update_counts()
         self._update_nav_selection()
 
@@ -417,8 +461,128 @@ class ClipboardView(tk.Frame):
             except tk.TclError:
                 pass
 
+    def _cancel_add_job(self) -> None:
+        job = self._add_job
+        self._add_job = None
+        self._pending_add_ids.clear()
+        if job is not None:
+            try:
+                self.after_cancel(job)
+            except tk.TclError:
+                pass
+
+    def _cancel_refresh_job(self) -> None:
+        job = self._refresh_job
+        self._refresh_job = None
+        if job is not None:
+            try:
+                self.after_cancel(job)
+            except tk.TclError:
+                pass
+
+    def _schedule_refresh(self) -> None:
+        if self._detached:
+            return
+        self._cancel_refresh_job()
+        self._refresh_job = self.after(
+            self.REFRESH_DEBOUNCE_MS, self._flush_refresh
+        )
+
+    def _flush_refresh(self) -> None:
+        self._refresh_job = None
+        if not self._detached:
+            self.refresh(reset_scroll=False)
+
+    def _flush_pending_events(self) -> None:
+        """Testing helper: run pending add/refresh debounces immediately."""
+        if self._add_job is not None:
+            job = self._add_job
+            self._add_job = None
+            try:
+                self.after_cancel(job)
+            except tk.TclError:
+                pass
+            self._flush_added()
+        if self._refresh_job is not None:
+            self._cancel_refresh_job()
+            self._flush_refresh()
+
+    def _update_load_more_footer(self) -> None:
+        inner = self.list_scroll.inner
+        if not self._has_more or not self._entries:
+            footer = self._load_more_frame
+            self._load_more_frame = None
+            if footer is not None:
+                try:
+                    footer.destroy()
+                except tk.TclError:
+                    pass
+            return
+        if self._load_more_frame is None:
+            frame = tk.Frame(inner, bg=BG)
+            frame.pack(fill="x", padx=6, pady=(0, 8))
+            FlatButton(
+                frame,
+                "加载更多",
+                self._load_more,
+                fonts=self.fonts,
+                font_size=10,
+                padx=12,
+                pady=7,
+            ).pack(side="left")
+            self._load_more_label_var = tk.StringVar()
+            tk.Label(
+                frame,
+                textvariable=self._load_more_label_var,
+                bg=BG,
+                fg=MUTED,
+                font=self.fonts.u(9),
+            ).pack(side="left", padx=(8, 0))
+            self._load_more_frame = frame
+        self._load_more_label_var.set(f"已显示 {len(self._entries)} 条")
+
+    def _load_more(self) -> None:
+        service = self.service
+        if (
+            service is None
+            or self._loading_more
+            or not self._has_more
+            or self._detached
+        ):
+            return
+        self._loading_more = True
+        try:
+            fetched = service.entries(
+                self._filter_kind,
+                self.search.get(),
+                newest_first=self._newest_first,
+                limit=self.PAGE_SIZE + 1,
+                offset=len(self._entries),
+            )
+        except Exception:
+            log.exception("加载更多剪贴板记录失败")
+            fetched = []
+        finally:
+            self._loading_more = False
+        if not fetched:
+            self._has_more = False
+            self._update_load_more_footer()
+            return
+        new_entries = fetched[: self.PAGE_SIZE]
+        self._has_more = len(fetched) > self.PAGE_SIZE
+        start = len(self._entries)
+        self._entries.extend(new_entries)
+        self._update_load_more_footer()
+        if self._render_job is not None:
+            return
+        self._render_cursor = start
+        self._render_more_cards(self._render_generation)
+
     def _render_list(self, *, reset_scroll: bool) -> None:
         self._cancel_pending_render()
+        self._cancel_add_job()
+        self._cancel_refresh_job()
+        self._load_more_frame = None
         inner = self.list_scroll.inner
         try:
             previous = self.list_scroll.canvas.yview()[0]
@@ -476,6 +640,7 @@ class ClipboardView(tk.Frame):
         for entry in self._entries[:initial]:
             self._make_card(inner, entry)
         self._render_cursor = initial
+        self._update_load_more_footer()
 
         self.update_idletasks()
         if reset_scroll:
@@ -508,7 +673,11 @@ class ClipboardView(tk.Frame):
         total = len(self._entries)
         deadline = time.perf_counter() + self.CARD_CHUNK_BUDGET_SECONDS
         while cursor < total:
-            self._make_card(inner, self._entries[cursor])
+            self._make_card(
+                inner,
+                self._entries[cursor],
+                before=self._load_more_frame,
+            )
             cursor += 1
             if time.perf_counter() >= deadline:
                 break
@@ -519,7 +688,13 @@ class ClipboardView(tk.Frame):
                 lambda: self._render_more_cards(generation),
             )
 
-    def _make_card(self, parent: tk.Misc, entry: ClipboardEntry) -> None:
+    def _make_card(
+        self,
+        parent: tk.Misc,
+        entry: ClipboardEntry,
+        *,
+        before: tk.Misc | None = None,
+    ) -> None:
         selected = entry.id == self._selected_id
         background = ROW_ACTIVE if selected else PANEL_ALT
         card = tk.Frame(
@@ -531,7 +706,10 @@ class ClipboardView(tk.Frame):
             padx=1,
             pady=1,
         )
-        card.pack(fill="x", padx=3, pady=3)
+        if before is None:
+            card.pack(fill="x", padx=3, pady=3)
+        else:
+            card.pack(fill="x", padx=3, pady=3, before=before)
         inner = tk.Frame(card, bg=background, padx=9, pady=8)
         inner.pack(fill="x")
 
@@ -1303,25 +1481,21 @@ class ClipboardView(tk.Frame):
                 preview = "\n".join(exc.missing[:5])
                 if len(exc.missing) > 5:
                     preview += f"\n……另有 {len(exc.missing) - 5} 个"
-                confirmed = messagebox.askyesno(
+                confirmed = ask_yes_no(
+                    self,
                     "部分文件不可访问",
                     "以下文件已移动或删除：\n\n"
                     f"{preview}\n\n仍复制其余 {len(exc.available)} 个文件？",
-                    parent=self.winfo_toplevel(),
                 )
                 if not confirmed:
                     return
                 self.service.copy_entry(entry, paths=exc.available)
         except ClipboardError as exc:
-            messagebox.showerror(
-                "无法复制", str(exc), parent=self.winfo_toplevel()
-            )
+            show_error(self, "无法复制", str(exc))
             return
         except Exception as exc:
             log.exception("复制剪贴板记录失败")
-            messagebox.showerror(
-                "无法复制", str(exc), parent=self.winfo_toplevel()
-            )
+            show_error(self, "无法复制", str(exc))
             return
         # ``service.copy_entry`` emits the synchronous "copied" event; the
         # view only updates the flash and the selected entry's copy count,
@@ -1333,9 +1507,7 @@ class ClipboardView(tk.Frame):
         try:
             self.service.copy_plain_text(path)
         except Exception as exc:
-            messagebox.showerror(
-                "无法复制路径", str(exc), parent=self.winfo_toplevel()
-            )
+            show_error(self, "无法复制路径", str(exc))
             return
         self._flash("路径已复制到剪贴板")
 
@@ -1358,21 +1530,17 @@ class ClipboardView(tk.Frame):
         if kind == "text":
             return
         if kind == "files" and entry.source_platform != current_platform():
-            messagebox.showerror(
+            show_error(
+                self,
                 "无法打开位置",
                 f"该路径来自 {platform_label(entry.source_platform)}，"
                 "当前系统无法访问。",
-                parent=self.winfo_toplevel(),
             )
             return
         if kind == "image":
             path = self.service.image_file(entry)
             if path is None:
-                messagebox.showerror(
-                    "无法打开位置",
-                    "图片文件不存在。",
-                    parent=self.winfo_toplevel(),
-                )
+                show_error(self, "无法打开位置", "图片文件不存在。")
                 return
             target = str(path)
         else:
@@ -1380,19 +1548,17 @@ class ClipboardView(tk.Frame):
                 entry.paths, entry.source_platform
             )
             if not available:
-                messagebox.showerror(
+                show_error(
+                    self,
                     "无法打开位置",
                     "文件已移动或删除：\n" + "\n".join(missing[:5]),
-                    parent=self.winfo_toplevel(),
                 )
                 return
             target = available[0]
         try:
             reveal_path(target)
         except ClipboardError as exc:
-            messagebox.showerror(
-                "无法打开位置", str(exc), parent=self.winfo_toplevel()
-            )
+            show_error(self, "无法打开位置", str(exc))
 
     def _delete_current(self) -> None:
         self._flush_text_edit()
@@ -1411,9 +1577,7 @@ class ClipboardView(tk.Frame):
         try:
             deleted = self.service.delete_entry(entry_id)
         except Exception as exc:
-            messagebox.showerror(
-                "无法删除", str(exc), parent=self.winfo_toplevel()
-            )
+            show_error(self, "无法删除", str(exc))
             return
         if deleted:
             # The synchronous "deleted" event already refreshed the list and
@@ -1530,6 +1694,125 @@ class ClipboardView(tk.Frame):
             except tk.TclError:
                 pass
 
+    def _remove_card(self, entry_id: int) -> None:
+        for widget in self._card_rows.pop(entry_id, []):
+            try:
+                widget.destroy()
+            except tk.TclError:
+                pass
+        self._card_labels.pop(entry_id, None)
+        self._card_actions.pop(entry_id, None)
+
+    def _apply_deleted(self, entry_id: int | None) -> None:
+        if entry_id is None:
+            return
+        self._flush_text_edit()
+        index = next(
+            (
+                position
+                for position, entry in enumerate(self._entries)
+                if entry.id == entry_id
+            ),
+            None,
+        )
+        if index is None:
+            if self.service is not None:
+                try:
+                    self._counts = self.service.counts()
+                except Exception:
+                    log.exception("刷新剪贴板计数失败")
+                self._update_counts()
+                self._update_nav_selection()
+            return
+        entry = self._entries.pop(index)
+        self._remove_card(entry_id)
+        if index < self._render_cursor:
+            self._render_cursor = max(0, self._render_cursor - 1)
+        kind = (
+            entry.kind.value
+            if hasattr(entry.kind, "value")
+            else str(entry.kind)
+        )
+        self._counts[kind] = max(0, self._counts.get(kind, 1) - 1)
+        self._counts["all"] = max(0, self._counts.get("all", 1) - 1)
+        self._update_counts()
+        self._update_nav_selection()
+        if self._selected_id == entry_id:
+            if self._entries:
+                self._selected_id = None
+                neighbor = self._entries[min(index, len(self._entries) - 1)]
+                self._select(neighbor.id)
+            else:
+                self._selected_id = None
+                self._render_detail(None, force=True)
+        self._update_load_more_footer()
+
+    def _queue_add(self, entry_id: int | None) -> None:
+        if entry_id is None:
+            return
+        self._pending_add_ids.append(entry_id)
+        if self._add_job is None:
+            self._add_job = self.after(
+                self.ADD_DEBOUNCE_MS, self._flush_added
+            )
+
+    def _flush_added(self) -> None:
+        self._add_job = None
+        ids = self._pending_add_ids[:]
+        self._pending_add_ids.clear()
+        service = self.service
+        if self._detached or service is None or not ids:
+            return
+        entries: list[ClipboardEntry] = []
+        for entry_id in ids:
+            entry = service.get(entry_id)
+            if entry is not None:
+                entries.append(entry)
+        if not entries:
+            return
+        try:
+            self._counts = service.counts()
+        except Exception:
+            log.exception("刷新剪贴板计数失败")
+        search_active = bool(self.search.get().strip())
+        try:
+            at_top = self.list_scroll.canvas.yview()[0] <= 1e-4
+        except tk.TclError:
+            at_top = True
+        fast_path = (
+            not search_active
+            and self._filter_kind is None
+            and self._newest_first
+            and at_top
+            and self._render_job is None
+            and self._render_cursor >= len(self._entries)
+        )
+        if not fast_path:
+            self._update_counts()
+            self._update_nav_selection()
+            self._schedule_refresh()
+            return
+        inner = self.list_scroll.inner
+        was_empty = not self._entries
+        for entry in entries:
+            for position, existing in enumerate(self._entries):
+                if existing.id == entry.id:
+                    self._entries.pop(position)
+                    self._remove_card(entry.id)
+                    break
+            self._entries.insert(0, entry)
+            children = inner.winfo_children()
+            first = children[0] if children else None
+            self._make_card(inner, entry, before=first)
+            if self._selected_id == entry.id:
+                self._render_detail(entry)
+        self._update_counts()
+        self._update_nav_selection()
+        if was_empty and self._entries:
+            self._selected_id = None
+            self._select(self._entries[0].id)
+        self._update_load_more_footer()
+
     def _on_service_event(self, event: str, entry_id: int | None) -> None:
         if self._detached:
             return
@@ -1541,15 +1824,29 @@ class ClipboardView(tk.Frame):
             self._flash("已复制到剪贴板")
             self._refresh_copied_detail(entry_id)
             return
-        self.refresh(reset_scroll=False)
+        if event == "deleted":
+            self._apply_deleted(entry_id)
+            return
+        if event == "cleared":
+            self._cancel_add_job()
+            self._cancel_refresh_job()
+            self.refresh(reset_scroll=True)
+            return
+        if event == "added":
+            self._queue_add(entry_id)
+            return
+        if event == "error":
+            self._update_status()
+            return
+        self._schedule_refresh()
 
     # --------------------------------------------------------------- settings
     def _open_settings(self) -> None:
         if self.service is None:
-            messagebox.showerror(
+            show_error(
+                self,
                 "剪贴板不可用",
                 self._startup_error or "剪贴板后台服务未启动。",
-                parent=self.winfo_toplevel(),
             )
             return
         self._flush_text_edit()
@@ -1646,6 +1943,8 @@ class ClipboardView(tk.Frame):
             log.exception("窗口关闭时保存剪贴板编辑失败")
         self._cancel_edit_timer()
         self._cancel_pending_render()
+        self._cancel_add_job()
+        self._cancel_refresh_job()
         self._text_editor = None
         self._edit_dirty = False
         self._detached = True

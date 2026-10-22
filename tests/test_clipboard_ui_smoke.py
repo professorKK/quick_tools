@@ -462,19 +462,28 @@ def test_ui_editing_survives_copy(setup) -> None:
     assert service.get(text_entry.id).text_content.endswith("ab")
 
 
-def test_ui_delete_refreshes_once(setup, monkeypatch) -> None:
+def test_ui_delete_is_incremental(setup, monkeypatch) -> None:
     _root, _window, view, service, _backend, _text_entry, image_entry, _file_entry = setup
-    calls: list[int] = []
-    original_refresh = view.refresh
+    refresh_calls: list[int] = []
+    built_cards: list[int] = []
+    original_make = view._make_card
 
-    def counted(*args, **kwargs):
-        calls.append(1)
-        return original_refresh(*args, **kwargs)
+    def counted_make(*args, **kwargs):
+        built_cards.append(1)
+        return original_make(*args, **kwargs)
 
-    monkeypatch.setattr(view, "refresh", counted)
+    monkeypatch.setattr(
+        view, "refresh", lambda *args, **kwargs: refresh_calls.append(1)
+    )
+    monkeypatch.setattr(view, "_make_card", counted_make)
+
     view._delete_entry(image_entry.id)
+
     assert service.get(image_entry.id) is None
-    assert calls == [1]
+    assert refresh_calls == []
+    assert built_cards == []
+    assert image_entry.id not in view._card_rows
+    assert view._count_vars["image"].get() == "0"
 
 
 def test_ui_settings_entry_uses_shared_dialog(setup) -> None:
@@ -505,12 +514,13 @@ def test_clipboard_settings_panel_saves(setup, monkeypatch) -> None:
         monkeypatch.setattr(view, "refresh", counted)
         panel.entries_var.set("100")
         panel._save()
+        view._flush_pending_events()
         root.update_idletasks()
         assert service.settings.max_entries == 100
         assert len(calls) == 1
 
         monkeypatch.setattr(
-            "quicktools.plugins.clipboard.settings_view.messagebox.askyesno",
+            "quicktools.plugins.clipboard.settings_view.ask_yes_no",
             lambda *args, **kwargs: True,
         )
         panel._clear_history()
@@ -518,3 +528,122 @@ def test_clipboard_settings_panel_saves(setup, monkeypatch) -> None:
         assert len(calls) == 2
     finally:
         host.destroy()
+
+
+def test_refresh_removes_missing_image_entries(setup) -> None:
+    (
+        root,
+        _window,
+        view,
+        service,
+        _backend,
+        text_entry,
+        image_entry,
+        file_entry,
+    ) = setup
+    image_path = service.image_file(image_entry)
+    assert image_path is not None
+    image_path.unlink()
+
+    # Opening the plugin window runs maintenance; simulate that here.
+    service.maintenance(force=True)
+    view.refresh()
+    root.update()
+
+    assert service.get(image_entry.id) is None
+    assert image_entry.id not in view._card_rows
+    assert text_entry.id in view._card_rows
+    assert file_entry.id in view._card_rows
+    assert view._count_vars["image"].get() == "0"
+
+
+def test_ui_three_panes_are_resizable(setup) -> None:
+    root, window, view, _service, _backend, _text, _image, _file = setup
+    window.geometry("1100x700+50+50")
+    root.update()
+
+    panes = view.paned.panes()
+    assert isinstance(view.paned, tk.PanedWindow)
+    assert len(panes) == 3
+    widgets = [view.nametowidget(pane) for pane in panes]
+    assert [int(view.paned.panecget(pane, "minsize")) for pane in panes] == [
+        220,
+        340,
+        320,
+    ]
+
+    sidebar_width = widgets[0].winfo_width()
+    view.paned.sash_place(0, sidebar_width + 60, 0)
+    root.update()
+    assert widgets[0].winfo_width() >= sidebar_width + 40
+
+    view.paned.sash_place(0, 0, 0)
+    root.update()
+    assert widgets[0].winfo_width() >= 220
+
+
+def test_ui_pagination_loads_page_size(setup) -> None:
+    root, _window, view, service, _backend, _text, _image, _file = setup
+    for index in range(205):
+        service.store.add(
+            ClipboardContent(
+                kind=ClipboardKind.TEXT, text=f"pagination {index}"
+            )
+        )
+
+    view.refresh(reset_scroll=True)
+    root.update()
+
+    assert len(view._entries) == view.PAGE_SIZE
+    assert view._has_more is True
+
+    view._load_more()
+    root.update()
+
+    assert len(view._entries) == 208
+    assert view._has_more is False
+
+
+def test_ui_add_at_top_is_incremental(setup, monkeypatch) -> None:
+    root, _window, view, service, _backend, _text, _image, _file = setup
+    view.list_scroll.scroll_to_top()
+    root.update()
+    refresh_calls: list[int] = []
+    monkeypatch.setattr(
+        view, "refresh", lambda *args, **kwargs: refresh_calls.append(1)
+    )
+
+    entry = service.store.add(
+        ClipboardContent(kind=ClipboardKind.TEXT, text="brand new")
+    )
+    view._on_service_event("added", entry.id)
+    view._flush_pending_events()
+    root.update()
+
+    assert refresh_calls == []
+    assert view._entries[0].id == entry.id
+    assert entry.id in view._card_rows
+
+
+def test_ui_add_batch_coalesces_one_refresh(setup, monkeypatch) -> None:
+    root, _window, view, service, _backend, _text, _image, _file = setup
+    view._filter_kind = ClipboardKind.FILES
+    refresh_calls: list[int] = []
+    monkeypatch.setattr(
+        view, "refresh", lambda *args, **kwargs: refresh_calls.append(1)
+    )
+
+    entries = [
+        service.store.add(
+            ClipboardContent(
+                kind=ClipboardKind.TEXT, text=f"batched {index}"
+            )
+        )
+        for index in range(5)
+    ]
+    for entry in entries:
+        view._on_service_event("added", entry.id)
+    view._flush_pending_events()
+    root.update()
+
+    assert len(refresh_calls) == 1

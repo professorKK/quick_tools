@@ -226,6 +226,10 @@ class AnnotationToolbar(tk.Frame):
     def _select_tool(self, tool: Tool) -> None:
         self.canvas.set_tool(tool)
         self._sync_tool(tool)
+        if tool is Tool.STICKER:
+            # Sticker flow: open the picker immediately and insert the image
+            # at the center; the canvas returns to SELECT afterwards.
+            self.canvas.add_sticker_at_center()
 
     def _sync_tool(self, tool: Tool) -> None:
         for item, button in self._tool_buttons.items():

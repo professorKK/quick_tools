@@ -5,7 +5,7 @@ from __future__ import annotations
 import math
 from typing import Iterable
 
-from PIL import Image, ImageColor, ImageDraw, ImageOps
+from PIL import Image, ImageColor, ImageDraw
 
 from ..models import Rect
 from .annotations import Annotation, Tool
@@ -229,16 +229,14 @@ def _draw_sticker(working: Image.Image, annotation: Annotation) -> Image.Image:
     if bounds.width < 1 or bounds.height < 1:
         return working
     try:
-        sticker = ImageOps.contain(
-            annotation.image.convert("RGBA"),
-            (max(1, bounds.width), max(1, bounds.height)),
-            Image.LANCZOS,
+        # Match the editor preview: the sticker fills its annotation bounds,
+        # including non-uniform stretches from dragging the selection frame.
+        sticker = annotation.image.convert("RGBA").resize(
+            (max(1, bounds.width), max(1, bounds.height)), Image.LANCZOS
         )
     except Exception:
         return working
-    x = bounds.x + (bounds.width - sticker.width) // 2
-    y = bounds.y + (bounds.height - sticker.height) // 2
-    return _paste_rgba(working, sticker, (x, y))
+    return _paste_rgba(working, sticker, (bounds.x, bounds.y))
 
 
 def _draw_watermark(

@@ -244,7 +244,14 @@ class CaptureOverlay:
             try:
                 image = freeform_crop(self._monitor_image, points)
             except ValueError:
+                log.warning("自由截图失败：套索区域无效")
                 return
+            log.info(
+                "用户操作：自由截图套索完成，路径点=%d，结果=%d×%d",
+                len(points),
+                image.width,
+                image.height,
+            )
             self.destroy()
             self._on_selected(image)
             return
@@ -259,8 +266,15 @@ class CaptureOverlay:
             self._update_selection()
             return
         global_rect = screen_local_to_global(self._screen, selection)
+        log.info(
+            "用户操作：选区完成，本地=%s，全局=%s，模式=%s",
+            selection,
+            global_rect,
+            self._mode.value,
+        )
         image = crop_global_rect(self._captured, global_rect)
         if image is None:
+            log.warning("截图失败：选区超出抓屏范围 %s", global_rect)
             self._cancel()
             return
         self.destroy()
@@ -355,5 +369,6 @@ class CaptureOverlay:
             pass
 
     def _cancel(self) -> None:
+        log.info("用户操作：取消截图选区（%s）", self._mode.value)
         self.destroy()
         self._on_cancel()

@@ -303,3 +303,138 @@ def test_update_text_merges_into_duplicate(store: ClipboardStore) -> None:
 def test_store_rejects_empty_text(store: ClipboardStore) -> None:
     with pytest.raises(ClipboardError):
         store.add(ClipboardContent(kind=ClipboardKind.TEXT, text="   "))
+
+
+def test_missing_image_files_are_removed(
+    store: ClipboardStore, tmp_path: Path
+) -> None:
+    image = store.add(
+        ClipboardContent(
+            kind=ClipboardKind.IMAGE, image_png=png_bytes(), source="screenshot"
+        )
+    )
+    text = store.add(
+        ClipboardContent(kind=ClipboardKind.TEXT, text="keep me")
+    )
+    image_file = store.image_file(image)
+    thumb_file = store.thumb_file(image)
+    assert image_file is not None and thumb_file is not None
+
+    image_file.unlink()
+
+    assert store.remove_missing_images() == 1
+    assert store.get(image.id) is None
+    assert not thumb_file.exists()
+    assert store.get(text.id) is not None
+    assert store.counts()["image"] == 0
+
+
+def test_store_startup_removes_missing_images(tmp_path: Path) -> None:
+    first = ClipboardStore(tmp_path, clock=Clock())
+    try:
+        image = first.add(
+            ClipboardContent(kind=ClipboardKind.IMAGE, image_png=png_bytes())
+        )
+        path = first.image_file(image)
+        assert path is not None
+        path.unlink()
+    finally:
+        first.close()
+
+    reopened = ClipboardStore(tmp_path, clock=Clock())
+    try:
+        assert reopened.get(image.id) is None
+        assert reopened.counts()["image"] == 0
+    finally:
+        reopened.close()
+
+
+def test_maintenance_removes_orphans_and_temps(
+    store: ClipboardStore, tmp_path: Path
+) -> None:
+    import os
+    import time
+
+    image = store.add(
+        ClipboardContent(kind=ClipboardKind.IMAGE, image_png=png_bytes())
+    )
+    image_file = store.image_file(image)
+    thumb_file = store.thumb_file(image)
+    assert image_file is not None and thumb_file is not None
+
+    orphan_image = tmp_path / "images" / "orphan.png"
+    orphan_thumb = tmp_path / "thumbs" / "orphan.png"
+    temp_image = tmp_path / "images" / ".old.tmp"
+    temp_thumb = tmp_path / "thumbs" / ".old.tmp"
+    for path in (orphan_image, orphan_thumb, temp_image, temp_thumb):
+        path.write_bytes(b"x")
+        old = time.time() - 3600
+        os.utime(path, (old, old))
+
+    stats = store.maintenance(
+        orphan_grace_seconds=0, temp_grace_seconds=0
+    )
+
+    assert stats.orphan_images == 1
+    assert stats.orphan_thumbs == 1
+    assert stats.temp_files == 2
+    assert image_file.exists() and thumb_file.exists()
+    assert not orphan_image.exists()
+    assert not orphan_thumb.exists()
+    assert not temp_image.exists()
+    assert not temp_thumb.exists()
+
+
+def test_maintenance_keeps_fresh_orphans(
+    store: ClipboardStore, tmp_path: Path
+) -> None:
+    store.add(ClipboardContent(kind=ClipboardKind.TEXT, text="keep"))
+    orphan = tmp_path / "thumbs" / "fresh.png"
+    orphan.write_bytes(b"fresh")
+
+    stats = store.maintenance()
+
+    assert stats.orphan_thumbs == 0
+    assert orphan.exists()
+
+
+def test_maintenance_skips_rows_when_images_scan_fails(
+    store: ClipboardStore, monkeypatch
+) -> None:
+    image = store.add(
+        ClipboardContent(kind=ClipboardKind.IMAGE, image_png=png_bytes())
+    )
+    path = store.image_file(image)
+    assert path is not None
+    path.unlink()
+
+    original = ClipboardStore._scan_owned
+
+    def scan(directory):
+        if Path(directory).name == "images":
+            return None, []
+        return original(directory)
+
+    monkeypatch.setattr(store, "_scan_owned", scan)
+    store.maintenance(orphan_grace_seconds=0, temp_grace_seconds=0)
+
+    assert store.get(image.id) is not None
+
+
+def test_list_entries_limit_offset_and_no_hard_cap(store: ClipboardStore) -> None:
+    entries = [
+        store.add(
+            ClipboardContent(kind=ClipboardKind.TEXT, text=f"entry {index}")
+        )
+        for index in range(20)
+    ]
+    newest = store.list_entries(limit=5)
+    assert [entry.id for entry in newest] == [
+        entry.id for entry in reversed(entries[-5:])
+    ]
+    page = store.list_entries(limit=5, offset=5)
+    assert len(page) == 5
+    assert {entry.id for entry in page} == {
+        entry.id for entry in entries[10:15]
+    }
+    assert len(store.list_entries()) == 20

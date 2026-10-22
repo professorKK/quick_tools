@@ -4,11 +4,19 @@ from __future__ import annotations
 
 import queue
 import tkinter as tk
+from dataclasses import replace
+from pathlib import Path
 from tkinter import messagebox
 from typing import Callable
 
 from . import paths
 from .config import AppSettings, HotkeySpec, load_settings, save_settings
+from .data_migration import (
+    MigrationResult,
+    PluginDataError,
+    migrate_plugin_data,
+    normalize_plugin_data_root,
+)
 from .hotkey import HotkeyManager
 from .ipc import IpcServer
 from .launcher import Launcher
@@ -28,6 +36,7 @@ class QuickToolsApp:
         enable_high_dpi()
         paths.ensure_app_dirs()
         self._shutting_down = False
+        self._data_migration_busy = False
         self._hotkey_capturing = False
         self.show_error_dialogs = True
 
@@ -48,7 +57,16 @@ class QuickToolsApp:
         self._poll_job: str | None = None
         self._restore_launcher_after_settings = False
 
-        self.launcher = Launcher(self, self.root)
+        configured_root = self.settings.plugin_data_root
+        self.launcher = Launcher(
+            self,
+            self.root,
+            plugin_data_root=(
+                paths.plugin_data_root(configured_root)
+                if configured_root
+                else None
+            ),
+        )
         self.hotkey.start()
         self.ipc = IpcServer(self._enqueue_command)
         self.ipc.start()
@@ -112,8 +130,11 @@ class QuickToolsApp:
                 if len(parts) == 3:
                     self.launcher.dispatch_plugin_action(parts[1], parts[2])
             elif command == "quit":
-                self.quit()
-                return
+                if self.quit():
+                    return
+                # A migration is in progress; keep the command pump alive so
+                # the app can be quit once it finishes.
+                continue
         self._poll_job = self.root.after(50, self._drain_commands)
 
     def run(self) -> None:
@@ -146,7 +167,7 @@ class QuickToolsApp:
             self._refresh_status_ui()
             return False, message
 
-        new_settings = AppSettings(hotkey=new_spec)
+        new_settings = replace(self.settings, hotkey=new_spec)
         try:
             save_settings(new_settings)
         except Exception as exc:
@@ -224,6 +245,77 @@ class QuickToolsApp:
         self._refresh_status_ui()
         return count, errors
 
+    # ------------------------------------------------------- plugin data root
+    @property
+    def data_migration_busy(self) -> bool:
+        return self._data_migration_busy
+
+    def begin_data_migration(self) -> None:
+        """Block exit while plugin data is being moved."""
+        self._data_migration_busy = True
+
+    def end_data_migration(self) -> None:
+        self._data_migration_busy = False
+
+    def current_plugin_data_root(self) -> Path:
+        raw = self.settings.plugin_data_root
+        return (
+            paths.plugin_data_root(raw)
+            if raw
+            else paths.default_plugin_data_root()
+        )
+
+    def suspend_plugins_for_data_root_change(self) -> Path:
+        """Stop plugin windows/services before moving their data."""
+        old_root = self.current_plugin_data_root()
+        self.launcher.suspend_plugins_for_data_root_change()
+        return old_root
+
+    def migrate_plugin_data_root(
+        self,
+        base_settings: AppSettings,
+        new_root: str,
+        *,
+        merge: bool = False,
+        progress=None,
+    ) -> tuple[MigrationResult, AppSettings]:
+        """Filesystem/config-only migration; safe to call from a worker."""
+        _stored, effective = normalize_plugin_data_root(
+            new_root, default_root=paths.default_plugin_data_root()
+        )
+        old_root = paths.plugin_data_root(base_settings.plugin_data_root)
+        result = migrate_plugin_data(
+            old_root, effective, merge=merge, progress=progress
+        )
+        new_settings = replace(
+            base_settings, plugin_data_root=_stored
+        )
+        try:
+            save_settings(new_settings)
+        except Exception as exc:
+            try:
+                result.rollback()
+            except Exception:
+                log.exception("回滚插件数据迁移失败")
+            raise PluginDataError(
+                f"保存设置失败，已尝试回滚：{exc}"
+            ) from exc
+        result.finalize()
+        return result, new_settings
+
+    def resume_plugins_after_data_root_change(
+        self, new_settings: AppSettings | None
+    ) -> None:
+        if new_settings is not None:
+            self.settings = new_settings
+            raw = new_settings.plugin_data_root
+            self.launcher.set_plugin_data_root(
+                paths.plugin_data_root(raw) if raw else None
+            )
+        self.launcher.resume_plugins()
+        self.launcher.reload_plugins()
+        self._refresh_status_ui()
+
     # ------------------------------------------------------------- settings
     def open_settings(self) -> None:
         if self.settings_window is not None and self._window_exists(
@@ -276,9 +368,12 @@ class QuickToolsApp:
             pass
 
     # --------------------------------------------------------------- shutdown
-    def quit(self) -> None:
+    def quit(self) -> bool:
+        if self._data_migration_busy:
+            log.warning("插件数据迁移进行中，已忽略退出请求")
+            return False
         if self._shutting_down:
-            return
+            return False
         self._shutting_down = True
         log.info("快捷工具正在退出")
         if self._poll_job is not None:
@@ -296,6 +391,7 @@ class QuickToolsApp:
             self.root.destroy()
         except tk.TclError:
             pass
+        return True
 
     def _cleanup(self) -> None:
         self._shutting_down = True

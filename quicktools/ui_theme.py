@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import ctypes
+import shutil
 import subprocess
 import sys
 import tkinter as tk
@@ -197,6 +198,49 @@ def open_in_file_manager(path: Path) -> None:
         os.startfile(str(path))  # type: ignore[attr-defined]
     else:
         subprocess.Popen(["xdg-open", str(path)])
+
+
+def reveal_in_file_manager(path: Path) -> None:
+    """Open the file manager with ``path`` selected where the platform allows.
+
+    Windows Explorer supports ``/select,``; Linux desktops that implement
+    ``org.freedesktop.FileManager1`` can select the item via DBus. Otherwise
+    fall back to opening the containing folder.
+    """
+    target = Path(path).expanduser()
+    if not target.exists():
+        raise FileNotFoundError(f"文件已移动或删除：{target}")
+    if sys.platform == "win32":
+        subprocess.Popen(["explorer", f"/select,{target}"])
+        return
+    if sys.platform == "darwin":
+        subprocess.Popen(["open", "-R", str(target)])
+        return
+
+    dbus_send = shutil.which("dbus-send")
+    if dbus_send:
+        try:
+            result = subprocess.run(
+                [
+                    dbus_send,
+                    "--session",
+                    "--dest=org.freedesktop.FileManager1",
+                    "--type=method_call",
+                    "/org/freedesktop/FileManager1",
+                    "org.freedesktop.FileManager1.ShowItems",
+                    f"array:string:{target.resolve().as_uri()}",
+                    "string:",
+                ],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=2,
+                check=False,
+            )
+            if result.returncode == 0:
+                return
+        except (OSError, subprocess.SubprocessError):
+            pass
+    open_in_file_manager(target.parent)
 
 
 class FlatButton(tk.Label):

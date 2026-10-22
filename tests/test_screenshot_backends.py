@@ -34,6 +34,51 @@ def test_wayland_backend_reports_portal_limitations(monkeypatch) -> None:
     assert not capabilities.scrolling
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="X11 text decoding")
+def test_x11_text_property_decoding() -> None:
+    pytest.importorskip("Xlib")
+    from quicktools.plugins.screenshot.capture.x11 import _decode_text_property
+
+    # ICCCM STRING 是 Latin-1，UTF8_STRING 才是 UTF-8。
+    assert _decode_text_property(b"images", "STRING") == "images"
+    assert _decode_text_property(b"caf\xe9", "STRING") == "café"
+    assert _decode_text_property("微信".encode(), "UTF8_STRING") == "微信"
+    assert _decode_text_property("微信".encode(), "COMPOUND_TEXT") == "微信"
+    assert _decode_text_property(b"  hi\x00 ", "UTF8_STRING") == "hi"
+    assert _decode_text_property(b"", "UTF8_STRING") == ""
+    assert _decode_text_property(None, "UTF8_STRING") == ""
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="X11 text decoding")
+def test_x11_window_title_prefers_net_wm_name(monkeypatch) -> None:
+    pytest.importorskip("Xlib")
+    from quicktools.plugins.screenshot.capture.x11 import X11Backend
+
+    class _Prop:
+        def __init__(self, value, property_type: int) -> None:
+            self.value = value
+            self.property_type = property_type
+
+    backend = object.__new__(X11Backend)
+    properties = {
+        "_NET_WM_NAME": _Prop("微信".encode(), 1),
+        "WM_NAME": _Prop("微信标题".encode(), 1),
+    }
+    monkeypatch.setattr(
+        backend, "_property", lambda _window, name: properties.get(name)
+    )
+    monkeypatch.setattr(
+        backend,
+        "_atom_name",
+        lambda atom: "UTF8_STRING" if atom == 1 else "COMPOUND_TEXT",
+    )
+    assert backend._window_title(object()) == "微信"
+
+    # 没有 _NET_WM_NAME 时退回 WM_NAME。
+    properties.pop("_NET_WM_NAME")
+    assert backend._window_title(object()) == "微信标题"
+
+
 @pytest.mark.skipif(
     sys.platform != "linux" or not os.environ.get("DISPLAY"),
     reason="X11 display required",

@@ -15,6 +15,7 @@ from quicktools.plugins.screenshot.capture.base import (
 from quicktools.plugins.screenshot.editor.annotations import Tool
 from quicktools.plugins.screenshot.models import (
     CapturedImage,
+    CaptureMode,
     Point,
     Rect,
     ScreenInfo,
@@ -145,6 +146,9 @@ class FakeEditor:
         on_close,
         on_return=None,
         on_autosave=None,
+        on_navigate=None,
+        nav_has_newer=False,
+        nav_has_older=False,
         initial_tool=None,
         **_kwargs,
     ) -> None:
@@ -152,6 +156,9 @@ class FakeEditor:
         self.on_copy = on_copy
         self.on_save = on_save
         self.on_autosave = on_autosave
+        self.on_navigate = on_navigate
+        self.nav_has_newer = nav_has_newer
+        self.nav_has_older = nav_has_older
         self.on_close = on_close
         self.on_return = on_return
         self.initial_tool = initial_tool
@@ -250,6 +257,8 @@ def setup_service(
     root = FakeRoot()
     actions, fake_actions = make_actions()
     service = ScreenshotService(tmp_path, root, actions)
+    # Keep test screenshots out of the real ~/Pictures/Screenshots folder.
+    service.settings.save_dir = str(tmp_path / "shots")
     service.start()
     return service, root, backend, fake_actions
 
@@ -341,7 +350,7 @@ def test_editor_autosave_updates_recent_entry(
         service.stop()
 
 
-def test_editor_autosave_overwrites_saved_file(
+def test_editor_autosave_updates_managed_file(
     monkeypatch, tmp_path: Path
 ) -> None:
     service, root, _backend, _actions = setup_service(monkeypatch, tmp_path)
@@ -351,14 +360,26 @@ def test_editor_autosave_overwrites_saved_file(
         overlay = FakeOverlay.instances[-1]
         overlay.on_selected(Image.new("RGB", (100, 50), (10, 20, 30)))
         editor = FakeEditor.instances[-1]
-        target = tmp_path / "saved.png"
+        target = tmp_path / "export.png"
 
         editor.on_save(Image.new("RGB", (100, 50), (10, 20, 30)), target)
         assert target.exists()
+        assert service.recent is not None
+        entry = service.recent_entries()[0]
+        managed = service.recent.image_path(entry)
+        assert managed is not None
+
         editor.on_autosave(Image.new("RGB", (70, 30), (0, 200, 0)))
-        with Image.open(target) as saved:
+        updated = service.recent_entries()[0]
+        assert (updated.width, updated.height) == (70, 30)
+        managed_after = service.recent.image_path(updated)
+        assert managed_after is not None
+        with Image.open(managed_after) as saved:
             assert saved.size == (70, 30)
             assert saved.convert("RGB").getpixel((10, 10))[1] > 150
+        # Explicit exports are snapshots and are not overwritten by autosave.
+        with Image.open(target) as exported:
+            assert exported.size == (100, 50)
     finally:
         service.stop()
 
@@ -604,5 +625,302 @@ def test_recent_favorite_toggle_and_filter(monkeypatch, tmp_path: Path) -> None:
         assert service.last_status == "已取消收藏"
         assert service.recent_entries(favorite=True) == []
         assert service.recent_entries(mode="region")
+    finally:
+        service.stop()
+
+
+def _capture_window(service, root) -> FakeEditor:
+    service.capture("window")
+    root.run_next()
+    overlay = FakeOverlay.instances[-1]
+    overlay.on_window_selected(overlay.windows[0])
+    root.run_next()
+    return FakeEditor.instances[-1]
+
+
+def test_window_capture_applies_margin(monkeypatch, tmp_path: Path) -> None:
+    service, root, _backend, _actions = setup_service(monkeypatch, tmp_path)
+    try:
+        service.update_settings(window_margin_px=25)
+        editor = _capture_window(service, root)
+        # FakeBackend 窗口为 Rect(100, 100, 200, 100)，四周各扩展 25。
+        assert editor.image.size == (250, 150)
+    finally:
+        service.stop()
+
+
+def test_window_capture_margin_clamps_to_screen(monkeypatch, tmp_path: Path) -> None:
+    service, root, _backend, _actions = setup_service(monkeypatch, tmp_path)
+    try:
+        service.update_settings(window_margin_px=500)
+        editor = _capture_window(service, root)
+        assert editor.image.size == (800, 600)
+    finally:
+        service.stop()
+
+
+def test_region_capture_ignores_window_margin(monkeypatch, tmp_path: Path) -> None:
+    service, root, _backend, _actions = setup_service(monkeypatch, tmp_path)
+    try:
+        service.update_settings(window_margin_px=100)
+        service.capture("region")
+        root.run_next()
+        overlay = FakeOverlay.instances[-1]
+        overlay.on_selected(Image.new("RGB", (30, 20), (5, 5, 5)))
+        assert FakeEditor.instances[-1].image.size == (30, 20)
+    finally:
+        service.stop()
+
+
+def test_editor_navigation_uses_recent_order_without_duplicates(
+    monkeypatch, tmp_path: Path
+) -> None:
+    service, _root, _backend, _actions = setup_service(monkeypatch, tmp_path)
+    try:
+        assert service.recent is not None
+
+        def add(color):
+            return service.recent.add_png(
+                service._png_bytes(Image.new("RGB", (40, 30), color)),
+                mode="region",
+            )
+
+        first = add((255, 0, 0))
+        middle = add((0, 255, 0))
+        last = add((0, 0, 255))
+        assert [entry.id for entry in service.recent_entries()] == [
+            last.id,
+            middle.id,
+            first.id,
+        ]
+
+        service._busy = True
+        service._active_entry_id = middle.id
+        service._open_editor(
+            Image.new("RGB", (40, 30), (1, 1, 1)), record_new=False
+        )
+        editor = FakeEditor.instances[-1]
+        assert editor.nav_has_newer is True
+        assert editor.nav_has_older is True
+
+        newer = editor.on_navigate(-1)
+        assert newer is not None and newer.entry_id == last.id
+        assert service._active_entry_id == last.id
+        assert newer.has_newer is False
+        assert newer.has_older is True
+
+        older = editor.on_navigate(1)
+        assert older is not None and older.entry_id == middle.id
+        assert service._active_entry_id == middle.id
+        assert len(service.recent_entries()) == 3
+    finally:
+        service.stop()
+
+
+def test_editor_navigation_skips_missing_file(
+    monkeypatch, tmp_path: Path
+) -> None:
+    service, _root, _backend, _actions = setup_service(monkeypatch, tmp_path)
+    try:
+        assert service.recent is not None
+
+        def add(color):
+            return service.recent.add_png(
+                service._png_bytes(Image.new("RGB", (40, 30), color)),
+                mode="region",
+            )
+
+        first = add((255, 0, 0))
+        middle = add((0, 255, 0))
+        last = add((0, 0, 255))
+        assert service.recent_entries()[0].id == last.id
+        missing = service.recent.image_path(last)
+        assert missing is not None
+        missing.unlink()
+
+        service._busy = True
+        service._active_entry_id = middle.id
+        service._open_editor(
+            Image.new("RGB", (40, 30), (1, 1, 1)), record_new=False
+        )
+        editor = FakeEditor.instances[-1]
+        assert editor.nav_has_newer is False
+        assert editor.on_navigate(-1) is None
+        assert service._active_entry_id == middle.id
+        assert first.id == service.recent_entries()[-1].id
+    finally:
+        service.stop()
+
+
+def test_autosave_reports_recent_update_failure(
+    monkeypatch, tmp_path: Path
+) -> None:
+    service, root, _backend, _actions = setup_service(monkeypatch, tmp_path)
+    try:
+        service.capture("region")
+        root.run_next()
+        overlay = FakeOverlay.instances[-1]
+        overlay.on_selected(Image.new("RGB", (30, 20), (5, 5, 5)))
+        assert service.recent is not None
+
+        def fail(_entry_id, _png, **_kwargs):
+            raise RuntimeError("disk full")
+
+        monkeypatch.setattr(service.recent, "update_png", fail)
+        assert service._autosave_image(Image.new("RGB", (30, 20))) is False
+    finally:
+        service.stop()
+
+
+def test_delete_recent_removes_managed_file(
+    monkeypatch, tmp_path: Path
+) -> None:
+    service, _root, _backend, _actions = setup_service(monkeypatch, tmp_path)
+    try:
+        assert service.recent is not None
+        entry = service.recent.add_png(
+            service._png_bytes(Image.new("RGB", (30, 20), (1, 2, 3))),
+            mode="region",
+        )
+        managed = service.recent.image_path(entry)
+        assert managed is not None
+
+        service.delete_recent(entry)
+
+        assert not managed.exists()
+        assert service.recent.get(entry.id) is None
+        assert "已删除截图及文件" in service.last_status
+    finally:
+        service.stop()
+
+
+def test_clear_recent_removes_managed_files(
+    monkeypatch, tmp_path: Path
+) -> None:
+    service, _root, _backend, _actions = setup_service(monkeypatch, tmp_path)
+    try:
+        assert service.recent is not None
+        managed_paths = []
+        for index in range(2):
+            entry = service.recent.add_png(
+                service._png_bytes(
+                    Image.new("RGB", (20, 10), (index, 2, 3))
+                ),
+                mode="region",
+            )
+            path = service.recent.image_path(entry)
+            assert path is not None
+            managed_paths.append(path)
+
+        service.clear_recent()
+
+        assert all(not path.exists() for path in managed_paths)
+        assert service.recent_entries(limit=10) == []
+        assert "2 个文件" in service.last_status
+    finally:
+        service.stop()
+
+
+def test_favorite_renames_managed_file(
+    monkeypatch, tmp_path: Path
+) -> None:
+    service, _root, _backend, _actions = setup_service(monkeypatch, tmp_path)
+    try:
+        assert service.recent is not None
+        entry = service.recent.add_png(
+            service._png_bytes(Image.new("RGB", (30, 20), (7, 8, 9))),
+            mode="region",
+        )
+        original = entry.path
+        starred = service.set_recent_favorite(entry, True)
+        assert starred is not None and starred.favorite is True
+        assert "_fav" in starred.path.name
+        assert starred.id == entry.id
+        assert starred.path.exists()
+        assert not original.exists()
+
+        unstarred = service.set_recent_favorite(starred, False)
+        assert unstarred is not None and unstarred.favorite is False
+        assert "_fav" not in unstarred.path.name
+        assert unstarred.path.exists()
+    finally:
+        service.stop()
+
+
+def test_import_images_adds_to_recent_and_opens_editor(
+    monkeypatch, tmp_path: Path
+) -> None:
+    service, _root, _backend, _actions = setup_service(monkeypatch, tmp_path)
+    try:
+        first = tmp_path / "first.png"
+        Image.new("RGB", (64, 48), (10, 20, 30)).save(first, "PNG")
+        second = tmp_path / "second.jpg"
+        Image.new("RGB", (32, 24), (40, 50, 60)).save(second, "JPEG")
+
+        entries = service.import_images([str(first), str(second)])
+
+        assert [entry.mode for entry in entries] == [
+            CaptureMode.IMPORT.value,
+            CaptureMode.IMPORT.value,
+        ]
+        assert [entry.width for entry in entries] == [64, 32]
+        assert len(service.recent_entries(limit=10)) == 2
+        assert service._busy
+        assert FakeEditor.instances
+        editor = FakeEditor.instances[-1]
+        assert editor.image.size == (64, 48)
+        assert editor.nav_has_newer or editor.nav_has_older
+        assert all(
+            entry.path.name.endswith(".png")
+            for entry in service.recent_entries(limit=10)
+        )
+        assert all(
+            "_import_" in entry.path.name
+            for entry in service.recent_entries(limit=10)
+        )
+
+        editor.on_close(True)
+
+        assert not service._busy
+        # Imported images follow the same close-keeps-record rule.
+        assert len(service.recent_entries(limit=10)) == 2
+    finally:
+        service.stop()
+
+
+def test_import_images_keeps_valid_files_when_one_fails(
+    monkeypatch, tmp_path: Path
+) -> None:
+    service, _root, _backend, _actions = setup_service(monkeypatch, tmp_path)
+    try:
+        good = tmp_path / "good.png"
+        Image.new("RGB", (20, 10), (1, 2, 3)).save(good, "PNG")
+        bad = tmp_path / "broken.png"
+        bad.write_text("not an image", encoding="utf-8")
+
+        entries = service.import_images([str(bad), str(good)])
+
+        assert len(entries) == 1
+        assert len(service.recent_entries(limit=10)) == 1
+        assert "1 张未能导入" in service.last_status
+        assert FakeEditor.instances
+    finally:
+        service.stop()
+
+
+def test_import_images_reports_failure_for_unreadable_files(
+    monkeypatch, tmp_path: Path
+) -> None:
+    service, _root, _backend, _actions = setup_service(monkeypatch, tmp_path)
+    try:
+        bad = tmp_path / "broken.png"
+        bad.write_text("not an image", encoding="utf-8")
+
+        entries = service.import_images([str(bad)])
+
+        assert entries == []
+        assert service.recent_entries(limit=10) == []
+        assert "导入图片失败" in service.last_status
+        assert not FakeEditor.instances
     finally:
         service.stop()

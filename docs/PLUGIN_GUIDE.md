@@ -286,7 +286,7 @@ class MyPlugin(PluginBase):
   - `context.root`：隐藏的 Tk 根窗口；不要销毁它。需要 `after` 定时任务时使用它，窗口关闭后回调仍可存活。
   - `context.plugin_id`：插件 id。
   - `context.plugin_dir`：插件自身目录。
-  - `context.data_dir`：插件专属的数据目录，已验证可写，可用于保存配置和数据库。
+  - `context.data_dir`：插件专属的数据目录，已验证可写，可用于保存配置和数据库。路径为 `<插件数据根目录>/<plugin_id>`，默认根目录是应用数据目录下的 `plugin_data/`，用户可在“设置 → 插件数据”中迁移到其他位置；插件不要假设它是固定路径，也不要把它写进配置后跨启动复用。
   - `context.meta`：当前插件的 `PluginMeta`（包含 `name`、`version`、`summary`、`description`、`author`、`icon` 等），用于自定义界面时读取插件信息；旧宿主可能为 `None`。
 - QuickTools 负责创建并关闭插件的 `Toplevel` 窗口。`create_ui(window)` 中只需要填充内容、设置标题和初始尺寸；标题栏和窗口行为由框架提供。
 - 普通插件（`background` 不为 `true`）：`create_ui` 在窗口首次打开时调用；窗口关闭后再次打开会创建一个新的插件实例。

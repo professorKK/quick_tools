@@ -36,6 +36,30 @@ _SKIPPED_WINDOW_TYPES = {
 }
 
 
+def _decode_text_property(value, type_name: str) -> str:
+    """Decode a WM_NAME/_NET_WM_NAME property value.
+
+    ICCCM ``STRING`` is Latin-1 while ``UTF8_STRING`` is UTF-8.
+    ``COMPOUND_TEXT`` may contain escape sequences, so it is only decoded as a
+    fallback; callers prefer ``_NET_WM_NAME`` which is always UTF-8.
+    """
+    if not value:
+        return ""
+    if isinstance(value, str):
+        return value.replace("\x00", "").strip()
+    if not isinstance(value, (bytes, bytearray)):
+        return ""
+    raw = bytes(value)
+    if (type_name or "").upper() == "STRING":
+        text = raw.decode("latin-1", "replace")
+    else:
+        try:
+            text = raw.decode("utf-8")
+        except UnicodeDecodeError:
+            text = raw.decode("latin-1", "replace")
+    return text.replace("\x00", "").strip()
+
+
 class X11Backend:
     name = "x11"
 
@@ -74,14 +98,27 @@ class X11Backend:
         except Exception:
             return ""
 
-    def _window_title(self, window) -> str:
-        try:
-            title = window.get_wm_name()
-        except Exception:
+    def _text_property(self, window, name: str) -> str:
+        prop = self._property(window, name)
+        if prop is None:
             return ""
-        if isinstance(title, bytes):
-            title = title.decode("utf-8", "replace")
-        return (title or "").strip()
+        try:
+            type_name = self._atom_name(int(prop.property_type))
+        except Exception:
+            type_name = ""
+        return _decode_text_property(prop.value, type_name)
+
+    def _window_title(self, window) -> str:
+        # python-xlib 的 get_wm_name() 只解码 STRING；微信、Chrome、Firefox
+        # 等使用 UTF8_STRING/COMPOUND_TEXT，会直接返回空标题。
+        for name in ("_NET_WM_NAME", "WM_NAME"):
+            try:
+                title = self._text_property(window, name)
+            except Exception:
+                title = ""
+            if title:
+                return title
+        return ""
 
     def _window_class(self, window) -> str:
         try:
@@ -204,7 +241,17 @@ class X11Backend:
                     continue
                 if getattr(attributes, "override_redirect", 0):
                     continue
+                states = self._property(window, "_NET_WM_STATE")
+                if states is not None and (
+                    self._atom("_NET_WM_STATE_HIDDEN")
+                    in {int(atom) for atom in list(states.value)}
+                ):
+                    # 最小化或位于其他工作区：冻结画面上看不到，不能参与选区。
+                    continue
                 title = self._window_title(window)
+                app_name = self._window_class(window)
+                if not title:
+                    title = app_name
                 if not title:
                     continue
                 window_types = self._property(window, "_NET_WM_WINDOW_TYPE")
@@ -236,7 +283,7 @@ class X11Backend:
                     WindowInfo(
                         handle=int(window_id),
                         title=title,
-                        app_name=self._window_class(window) or title,
+                        app_name=app_name or title,
                         rect=Rect(left, top, width, height),
                         z_order=index,
                     )
