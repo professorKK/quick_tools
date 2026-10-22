@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import tkinter as tk
+import tkinter.font as tkfont
 from pathlib import Path
 
 import pytest
@@ -20,6 +21,7 @@ from quicktools.plugins.calculator.settings import (
 )
 from quicktools.plugins.calculator.settings_view import CalculatorSettingsPanel
 from quicktools.plugins.calculator.view import CalculatorView
+from quicktools.ui_theme import DANGER
 
 pytestmark = pytest.mark.skipif(
     not os.environ.get("DISPLAY"), reason="Tkinter UI test needs a display"
@@ -156,7 +158,12 @@ def test_delete_row_reflows_focus_and_persists(
         add_record(view, "1+1")
         add_record(view, "2+2")
         assert view.scratchpad_record_count() == 2
-        assert view.rows[0].delete_button.cget("text") == "×"
+        delete_button = view.rows[0].delete_button
+        assert delete_button.cget("text") == "×"
+        assert delete_button.cget("fg").lower() == DANGER.lower()
+        delete_font = tkfont.Font(root=root, font=delete_button.cget("font"))
+        assert delete_font.actual("weight") == "bold"
+        assert delete_font.actual("size") == 12
 
         view.rows[0].delete_button._on_click()
         view.rows[0].delete_button._on_release()

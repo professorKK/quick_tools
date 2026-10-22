@@ -172,14 +172,16 @@ class ScratchRow(tk.Frame):
             "×",
             lambda: self.view.delete_row(self),
             fonts=fonts,
-            font_size=10,
+            font_size=12,
             padx=5,
             pady=2,
             bg=ROW,
-            fg=MUTED,
-            hover_bg="#FDECEA",
-            press_bg="#FAD2CF",
+            fg=DANGER,
+            hover_bg="#FDE2E1",
+            press_bg="#F7C9C6",
         )
+        # Keep the row-delete affordance unmistakable: red and bold.
+        self.delete_button.configure(font=fonts.u(12, "bold"))
         self.delete_button.grid(row=0, column=2, sticky="e", padx=(0, 6))
 
         self.separator = tk.Frame(self, bg=BORDER, height=1)
