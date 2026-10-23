@@ -146,6 +146,9 @@ class AppSettings:
     # Set after the launcher's one-time welcome banner is dismissed. Older
     # settings.json files do not contain the key, so they show the hint once.
     first_run_seen: bool = False
+    # Version of the welcome hint the user has acknowledged. Bumping the
+    # launcher's ONBOARDING_VERSION shows the revised hint once more.
+    onboarding_version: int = 0
 
     @classmethod
     def default(cls) -> "AppSettings":
@@ -157,6 +160,7 @@ class AppSettings:
             "hotkey": self.hotkey.to_mapping(),
             "plugin_data_root": self.plugin_data_root,
             "first_run_seen": self.first_run_seen,
+            "onboarding_version": self.onboarding_version,
         }
 
     @classmethod
@@ -164,6 +168,14 @@ class AppSettings:
         if not isinstance(data, dict):
             raise ValueError("配置文件根节点必须是对象")
         raw_root = data.get("plugin_data_root")
+        raw_version = data.get("onboarding_version")
+        onboarding_version = (
+            raw_version
+            if isinstance(raw_version, int)
+            and not isinstance(raw_version, bool)
+            and raw_version >= 0
+            else 0
+        )
         return cls(
             HotkeySpec.from_mapping(data.get("hotkey")),
             plugin_data_root=(
@@ -172,6 +184,7 @@ class AppSettings:
                 else ""
             ),
             first_run_seen=data.get("first_run_seen") is True,
+            onboarding_version=onboarding_version,
         )
 
 

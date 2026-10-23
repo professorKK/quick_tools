@@ -160,6 +160,24 @@ def test_show_preserves_user_resized_window(tools, monkeypatch) -> None:
     assert sizes == [(1000, 650)]
 
 
+def test_first_show_uses_documented_default_size(tools, monkeypatch) -> None:
+    launcher, root = tools
+    sizes: list[tuple[int, int]] = []
+    monkeypatch.setattr(
+        launcher_module,
+        "center_on_screen",
+        lambda _window, width, height: sizes.append((width, height)),
+    )
+
+    # Before the first map Tk reports the 720x480 minsize even though the
+    # pending geometry request is 860x560; show() must not adopt the minsize.
+    launcher.show()
+    root.update()
+
+    assert sizes == [(860, 560)]
+    launcher.hide()
+
+
 def test_card_status_keeps_requested_width(tools) -> None:
     launcher, root = tools
     meta = PluginMeta(

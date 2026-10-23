@@ -27,6 +27,14 @@ from quicktools.ui_theme import (
 )
 
 from .dialogs import ask_yes_no, show_error
+from .layout import (
+    MIN_DETAIL_WIDTH,
+    MIN_LIST_WIDTH,
+    MIN_SIDEBAR_WIDTH,
+    ClipboardLayout,
+    load_layout,
+    save_layout,
+)
 from .models import (
     ClipboardEntry,
     ClipboardError,
@@ -59,6 +67,7 @@ from .widgets import (
 log = logging.getLogger(__name__)
 
 CARD_HOVER = "#f8fafc"
+LAYOUT_SAVE_DELAY_MS = 400
 
 
 class ClipboardView(tk.Frame):
@@ -113,6 +122,16 @@ class ClipboardView(tk.Frame):
         self._add_job: str | None = None
         self._refresh_job: str | None = None
         self._loading_more = False
+        self._layout_dir = (
+            Path(self.service.data_dir) if self.service is not None else None
+        )
+        self._layout = (
+            load_layout(self._layout_dir)
+            if self._layout_dir is not None
+            else ClipboardLayout()
+        )
+        self._pending_layout: ClipboardLayout | None = None
+        self._layout_save_job: str | None = None
 
         # Three resizable panes: sidebar / history / detail. The sidebars stay
         # fixed when the window grows; the two content panes share extra space.
@@ -129,22 +148,28 @@ class ClipboardView(tk.Frame):
         self.paned.pack(fill="both", expand=True)
         self.paned.add(
             self._build_sidebar(),
-            minsize=220,
-            width=232,
+            minsize=MIN_SIDEBAR_WIDTH,
+            width=self._layout.sidebar_width,
             stretch="never",
         )
         self.paned.add(
             self._build_list_panel(),
-            minsize=340,
-            width=500,
+            minsize=MIN_LIST_WIDTH,
+            width=self._layout.list_width,
             stretch="always",
         )
         self.paned.add(
             self._build_detail_panel(),
-            minsize=320,
-            width=430,
+            minsize=MIN_DETAIL_WIDTH,
+            width=self._layout.detail_width,
             stretch="always",
         )
+        for widget in (
+            self.paned,
+            *(self.paned.nametowidget(pane) for pane in self.paned.panes()),
+        ):
+            widget.bind("<Configure>", self._on_layout_changed, add="+")
+            widget.bind("<ButtonRelease-1>", self._on_layout_changed, add="+")
 
         if self.service is not None:
             try:
@@ -155,6 +180,59 @@ class ClipboardView(tk.Frame):
         self.bind("<Destroy>", self._on_destroy, add="+")
         self._bind_keys()
         self.refresh(reset_scroll=True)
+
+    # ------------------------------------------------------------ pane layout
+    def _pane_widths(self) -> tuple[int, int, int] | None:
+        try:
+            panes = self.paned.panes()
+            if len(panes) != 3:
+                return None
+            widths = tuple(
+                int(self.paned.nametowidget(pane).winfo_width())
+                for pane in panes
+            )
+        except (tk.TclError, KeyError):
+            return None
+        if any(width <= 1 for width in widths):
+            return None
+        return widths  # type: ignore[return-value]
+
+    def _on_layout_changed(self, _event=None) -> None:
+        """Capture width changes caused by sash drags or window resizes."""
+        if self._detached:
+            return
+        widths = self._pane_widths()
+        if widths is None:
+            return
+        layout = ClipboardLayout(*widths)
+        if layout == self._layout and self._pending_layout is None:
+            return
+        self._pending_layout = layout
+        if self._layout_save_job is not None:
+            try:
+                self.after_cancel(self._layout_save_job)
+            except tk.TclError:
+                pass
+        self._layout_save_job = self.after(
+            LAYOUT_SAVE_DELAY_MS, self._flush_layout_save
+        )
+
+    def _flush_layout_save(self) -> None:
+        job = self._layout_save_job
+        self._layout_save_job = None
+        if job is not None:
+            try:
+                self.after_cancel(job)
+            except tk.TclError:
+                pass
+        layout = self._pending_layout
+        self._pending_layout = None
+        if layout is None or layout == self._layout:
+            return
+        self._layout = layout
+        if self._layout_dir is None:
+            return
+        save_layout(self._layout_dir, layout)
 
     # ---------------------------------------------------------------- layout
     def _build_sidebar(self) -> tk.Frame:
@@ -1956,6 +2034,10 @@ class ClipboardView(tk.Frame):
         self._cancel_pending_render()
         self._cancel_add_job()
         self._cancel_refresh_job()
+        try:
+            self._flush_layout_save()
+        except Exception:
+            log.exception("窗口关闭时保存剪贴板三栏布局失败")
         self._text_editor = None
         self._edit_dirty = False
         self._detached = True

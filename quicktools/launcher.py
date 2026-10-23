@@ -26,7 +26,6 @@ from .ui_theme import (
     BUTTON,
     BADGE_BG,
     BADGE_BG_HOVER,
-    DANGER,
     MUTED,
     PANEL,
     PANEL_ALT,
@@ -87,6 +86,10 @@ _AUTO_HIDE_DELAY_MS = 150
 # leaving a visible-but-inactive launcher behind.
 _FOCUS_RETRY_DELAYS_MS = (0, 20, 60, 120)
 
+# Bump when the one-time welcome hint changes so existing users see the new
+# onboarding once. ``onboarding_version`` in settings.json tracks this value.
+ONBOARDING_VERSION = 1
+
 
 class Launcher:
     def __init__(
@@ -131,6 +134,8 @@ class Launcher:
         self._show_started_at = 0.0
         self._header_logo = None
         self._first_run_hint: tk.Frame | None = None
+        self._default_size = (860, 560)
+        self._has_been_shown = False
         self._selected_card_index = -1
         try:
             self._header_logo = tk.PhotoImage(
@@ -162,7 +167,9 @@ class Launcher:
         self.reload_plugins()
         # Lay out while still hidden so the first hotkey show only has to map
         # an already-built window, not run the whole geometry pass on screen.
-        self.window.geometry("860x560")
+        self.window.geometry(
+            f"{self._default_size[0]}x{self._default_size[1]}"
+        )
         self.window.update_idletasks()
 
     # ---------------------------------------------------------------- build
@@ -300,28 +307,6 @@ class Launcher:
         for widget in (self.cards_canvas, self.cards_frame):
             self._bind_wheel(widget)
 
-        footer = tk.Frame(shell, bg=BG)
-        footer.pack(fill="x", pady=(10, 0))
-        self.status_var = tk.StringVar(value="")
-        self.status_label = tk.Label(
-            footer,
-            textvariable=self.status_var,
-            bg=BG,
-            fg=MUTED,
-            anchor="w",
-            justify="left",
-            wraplength=620,
-            font=self.fonts.u(9),
-        )
-        self.status_label.pack(side="left", fill="x", expand=True)
-        tk.Label(
-            footer,
-            text="关闭后仍驻留后台 · 状态栏图标可唤出",
-            bg=BG,
-            fg=MUTED,
-            font=self.fonts.u(9),
-        ).pack(side="right")
-
     # --------------------------------------------------------------- window
     def _on_launcher_map(self, event: tk.Event) -> None:
         if event.widget is not self.window:
@@ -344,7 +329,16 @@ class Launcher:
         except tk.TclError:
             return 860, 560
         if width <= 1 or height <= 1:
-            return 860, 560
+            return self._default_size
+        try:
+            mapped = bool(self.window.winfo_ismapped())
+        except tk.TclError:
+            mapped = False
+        if not self._has_been_shown and not mapped:
+            # Before the first map, Tk reports the minimum size (or 1x1) even
+            # though a larger geometry request is pending. Using that value
+            # would override the documented 860x560 default on the first show.
+            return self._default_size
         return (
             min(max(720, width), max_width),
             min(max(480, height), max_height),
@@ -370,6 +364,7 @@ class Launcher:
                 self.window.deiconify()
                 center_on_screen(self.window, width, height)
             self.window.lift()
+            self._has_been_shown = True
             self._focus_search()
             self._activate_window()
             self._set_auto_hide(auto_hide)
@@ -387,9 +382,20 @@ class Launcher:
         self._verify_foreground(0)
 
     def _maybe_show_first_run_hint(self) -> None:
-        """Show the one-time welcome banner for new users."""
+        """Show the welcome banner for a first run or a new onboarding revision."""
         settings = getattr(self.app, "settings", None)
-        if settings is None or getattr(settings, "first_run_seen", True):
+        if settings is None:
+            return
+        try:
+            onboarding_version = int(
+                getattr(settings, "onboarding_version", 0)
+            )
+        except (TypeError, ValueError):
+            onboarding_version = 0
+        if (
+            getattr(settings, "first_run_seen", False)
+            and onboarding_version >= ONBOARDING_VERSION
+        ):
             return
         if self._first_run_hint is not None:
             return
@@ -1425,7 +1431,6 @@ class Launcher:
                     )
                 self._cards.append(card)
         self._apply_card_selection()
-        self._update_status()
         self.cards_frame.update_idletasks()
         bbox = self.cards_canvas.bbox("all")
         if bbox:
@@ -1676,21 +1681,9 @@ class Launcher:
 
     # --------------------------------------------------------------- status
     def update_hotkey_status(self, text: str, warning: bool = False) -> None:
+        """Remember the latest status; the launcher no longer renders a footer."""
         self._hotkey_status = text
         self._hotkey_warning = warning
-        self._update_status()
-
-    def _update_status(self) -> None:
-        hotkey_text = getattr(self, "_hotkey_status", self.app.hotkey_status_text())
-        warning = getattr(self, "_hotkey_warning", self.app.hotkey_status_warning())
-        if not hotkey_text:
-            hotkey_text = "关闭窗口后仍在后台运行"
-        if self._errors:
-            extra = f"  ·  {len(self._errors)} 个插件未加载（详见设置）"
-        else:
-            extra = ""
-        self.status_var.set(hotkey_text + extra)
-        self.status_label.configure(fg=DANGER if warning else MUTED)
 
     def _open_settings(self) -> None:
         self.app.open_settings()

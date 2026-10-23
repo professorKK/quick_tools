@@ -71,7 +71,9 @@ def test_invalid_hotkeys(modifiers, key) -> None:
 def test_save_and_load_roundtrip(tmp_path: Path) -> None:
     path = tmp_path / "settings.json"
     settings = AppSettings(
-        HotkeySpec(("ctrl", "alt"), "q"), first_run_seen=True
+        HotkeySpec(("ctrl", "alt"), "q"),
+        first_run_seen=True,
+        onboarding_version=2,
     )
     save_settings(settings, path)
     loaded = load_settings(path)
@@ -80,6 +82,7 @@ def test_save_and_load_roundtrip(tmp_path: Path) -> None:
     assert payload["version"] == 1
     assert payload["hotkey"]["key"] == "q"
     assert payload["first_run_seen"] is True
+    assert payload["onboarding_version"] == 2
 
 
 def test_corrupt_settings_fall_back_to_default(tmp_path: Path, caplog) -> None:
@@ -124,6 +127,22 @@ def test_legacy_settings_default_to_empty_plugin_root(tmp_path: Path) -> None:
     )
     assert load_settings(path).plugin_data_root == ""
     assert load_settings(path).first_run_seen is False
+    assert load_settings(path).onboarding_version == 0
+
+
+def test_invalid_onboarding_version_falls_back_to_zero(tmp_path: Path) -> None:
+    path = tmp_path / "settings.json"
+    for value in (True, "3", -1, 2.5):
+        path.write_text(
+            json.dumps(
+                {
+                    "hotkey": {"modifiers": ["ctrl"], "key": "space"},
+                    "onboarding_version": value,
+                }
+            ),
+            encoding="utf-8",
+        )
+        assert load_settings(path).onboarding_version == 0
 
 
 def test_invalid_plugin_data_root_type_is_ignored(tmp_path: Path) -> None:
@@ -161,3 +180,25 @@ def test_set_hotkey_preserves_plugin_data_root(monkeypatch) -> None:
     assert ok
     assert saved["value"].plugin_data_root == "/tmp/custom-plugin-data"
     assert instance.settings.hotkey == HotkeySpec(("ctrl", "alt"), "q")
+
+
+def test_mark_first_run_seen_stamps_the_onboarding_version(monkeypatch) -> None:
+    from quicktools import app as app_module
+    from quicktools.launcher import ONBOARDING_VERSION
+
+    instance = object.__new__(app_module.QuickToolsApp)
+    instance.settings = AppSettings(
+        HotkeySpec(("alt",), "space"),
+        first_run_seen=True,
+        onboarding_version=0,
+    )
+    saved = {}
+    monkeypatch.setattr(
+        app_module, "save_settings", lambda value: saved.setdefault("value", value)
+    )
+
+    instance.mark_first_run_seen()
+
+    assert saved["value"].first_run_seen is True
+    assert saved["value"].onboarding_version == ONBOARDING_VERSION
+    assert instance.settings.onboarding_version == ONBOARDING_VERSION

@@ -11,6 +11,7 @@ from typing import Callable, Sequence
 import pytest
 from PIL import Image
 
+from quicktools.plugins.clipboard.layout import load_layout
 from quicktools.plugins.clipboard.models import (
     BackendStatus,
     ClipboardContent,
@@ -599,6 +600,49 @@ def test_ui_three_panes_are_resizable(setup) -> None:
     view.paned.sash_place(0, 0, 0)
     root.update()
     assert widgets[0].winfo_width() >= 220
+
+
+def test_ui_pane_widths_persist_between_openings(setup) -> None:
+    root, window, view, service, *_rest = setup
+    window.geometry("1100x700+50+50")
+    root.update()
+    panes = [view.nametowidget(pane) for pane in view.paned.panes()]
+
+    view.paned.sash_place(0, 300, 0)
+    view.paned.sash_place(1, 800, 0)
+    root.update()
+    widths = tuple(widget.winfo_width() for widget in panes)
+
+    view.paned.event_generate("<ButtonRelease-1>")
+    root.update()
+    assert view._pending_layout is not None
+    view._flush_layout_save()
+
+    saved = load_layout(service.data_dir)
+    assert (
+        saved.sidebar_width,
+        saved.list_width,
+        saved.detail_width,
+    ) == widths
+
+    window.destroy()
+    root.update()
+
+    reopened = tk.Toplevel(root)
+    reopened.withdraw()
+    reopened.geometry("1100x700+50+50")
+    second = ClipboardView(reopened, service)
+    second.pack(fill="both", expand=True)
+    reopened.deiconify()
+    root.update()
+    try:
+        reopened_panes = [
+            second.nametowidget(pane) for pane in second.paned.panes()
+        ]
+        assert tuple(widget.winfo_width() for widget in reopened_panes) == widths
+    finally:
+        reopened.destroy()
+        root.update()
 
 
 def test_ui_pagination_loads_page_size(setup) -> None:

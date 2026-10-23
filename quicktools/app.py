@@ -19,7 +19,7 @@ from .data_migration import (
 )
 from .hotkey import HotkeyManager
 from .ipc import IpcServer
-from .launcher import Launcher
+from .launcher import Launcher, ONBOARDING_VERSION
 from .logging_setup import get_logger
 from .plugin_loader import PluginLoader
 from .settings_ui import SettingsWindow
@@ -193,9 +193,16 @@ class QuickToolsApp:
 
     def mark_first_run_seen(self) -> None:
         """Persist that the launcher welcome hint has been dismissed."""
-        if self.settings.first_run_seen:
+        if (
+            self.settings.first_run_seen
+            and self.settings.onboarding_version >= ONBOARDING_VERSION
+        ):
             return
-        updated = replace(self.settings, first_run_seen=True)
+        updated = replace(
+            self.settings,
+            first_run_seen=True,
+            onboarding_version=ONBOARDING_VERSION,
+        )
         try:
             save_settings(updated)
         except Exception:

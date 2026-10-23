@@ -40,12 +40,15 @@ class FirstRunApp(FakeApp):
     def __init__(self, loader: PluginLoader) -> None:
         super().__init__(loader)
         self.settings = SimpleNamespace(
-            hotkey=HotkeySpec(("alt",), "space"), first_run_seen=False
+            hotkey=HotkeySpec(("alt",), "space"),
+            first_run_seen=False,
+            onboarding_version=0,
         )
         self.marked = 0
 
     def mark_first_run_seen(self) -> None:
         self.settings.first_run_seen = True
+        self.settings.onboarding_version = 1
         self.marked += 1
 
 
@@ -211,10 +214,34 @@ def test_first_run_hint_is_shown_once(tmp_path: Path) -> None:
         assert launcher._first_run_hint is None
         assert app.marked == 1
         assert app.settings.first_run_seen is True
+        assert app.settings.onboarding_version == 1
 
         launcher.show()
         root.update()
         assert launcher._first_run_hint is None
+        launcher.hide()
+    finally:
+        root.destroy()
+
+
+def test_legacy_first_run_flag_shows_the_new_onboarding_once(
+    tmp_path: Path,
+) -> None:
+    builtin = tmp_path / "builtin"
+    user = tmp_path / "user"
+    builtin.mkdir()
+    user.mkdir()
+    root = tk.Tk()
+    root.withdraw()
+    try:
+        app = FirstRunApp(PluginLoader(user, builtin))
+        # Settings from a build that predates onboarding_version.
+        app.settings.first_run_seen = True
+        app.settings.onboarding_version = 0
+        launcher = Launcher(app, root)
+        launcher.show()
+        root.update()
+        assert launcher._first_run_hint is not None
         launcher.hide()
     finally:
         root.destroy()
