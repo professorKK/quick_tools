@@ -20,6 +20,7 @@ from .plugin_api import (
 )
 from .ui_theme import (
     ACCENT,
+    ACCENT_SOFT,
     BG,
     BORDER,
     BUTTON,
@@ -129,6 +130,8 @@ class Launcher:
         self._auto_hide_requested = False
         self._show_started_at = 0.0
         self._header_logo = None
+        self._first_run_hint: tk.Frame | None = None
+        self._selected_card_index = -1
         try:
             self._header_logo = tk.PhotoImage(
                 master=root, file=str(paths.assets_dir() / "launcher.png")
@@ -142,7 +145,7 @@ class Launcher:
         self.app.apply_window_icon(self.window)
         self.window.configure(bg=BG)
         self.window.protocol("WM_DELETE_WINDOW", self.hide)
-        self.window.bind("<Escape>", lambda _e: self.hide())
+        self.window.bind("<Escape>", self._on_escape)
         self.window.bind("<FocusIn>", self._on_launcher_focus_in)
         self.window.bind("<FocusOut>", self._on_launcher_focus_out)
         self.window.minsize(720, 480)
@@ -166,6 +169,7 @@ class Launcher:
     def _build(self) -> None:
         shell = tk.Frame(self.window, bg=BG, padx=20, pady=16)
         shell.pack(fill="both", expand=True)
+        self._shell = shell
 
         header = tk.Frame(shell, bg=BG)
         header.pack(fill="x", pady=(0, 12))
@@ -233,6 +237,13 @@ class Launcher:
             fg=MUTED,
             font=self.fonts.u(10),
         ).pack(side="left", padx=(12, 6), pady=8)
+        tk.Label(
+            search_row,
+            text="↑↓ 选择 · Enter 打开",
+            bg=PANEL,
+            fg=MUTED,
+            font=self.fonts.u(8),
+        ).pack(side="right", padx=(6, 12), pady=8)
         self.search_var = tk.StringVar()
         self.search_var.trace_add("write", self._on_search_changed)
         self.search_entry = tk.Entry(
@@ -249,9 +260,12 @@ class Launcher:
         )
         self.search_entry.pack(side="left", fill="both", expand=True, padx=(0, 12), pady=8)
         self.search_entry.bind("<Return>", self._on_search_enter)
+        self.search_entry.bind("<Down>", lambda _event: self._move_selection(1))
+        self.search_entry.bind("<Up>", lambda _event: self._move_selection(-1))
 
         cards_border = tk.Frame(shell, bg=BORDER)
         cards_border.pack(fill="both", expand=True)
+        self._cards_border = cards_border
         self.cards_holder = tk.Frame(cards_border, bg=BG)
         self.cards_holder.pack(fill="both", expand=True, padx=1, pady=1)
         self.cards_canvas = tk.Canvas(
@@ -360,6 +374,7 @@ class Launcher:
             self._activate_window()
             self._set_auto_hide(auto_hide)
             self.search_var.set("")
+            self._maybe_show_first_run_hint()
             # Focus and paint the launcher before doing filesystem/plugin
             # work. On Windows, delaying activation until after
             # reload_plugins() leaves the window visibly inactive while that
@@ -370,6 +385,70 @@ class Launcher:
         finally:
             self._showing = False
         self._verify_foreground(0)
+
+    def _maybe_show_first_run_hint(self) -> None:
+        """Show the one-time welcome banner for new users."""
+        settings = getattr(self.app, "settings", None)
+        if settings is None or getattr(settings, "first_run_seen", True):
+            return
+        if self._first_run_hint is not None:
+            return
+        hint = tk.Frame(
+            self._shell,
+            bg=ACCENT_SOFT,
+            highlightbackground="#c7dcff",
+            highlightthickness=1,
+            padx=12,
+            pady=8,
+        )
+        try:
+            hotkey = settings.hotkey.display()
+        except Exception:
+            hotkey = "全局快捷键"
+        tk.Label(
+            hint,
+            text=(
+                f"按 {hotkey} 随时唤出；关闭窗口后仍在后台，"
+                "状态栏/托盘菜单可退出。"
+            ),
+            bg=ACCENT_SOFT,
+            fg=TEXT,
+            justify="left",
+            anchor="w",
+            wraplength=560,
+            font=self.fonts.u(9),
+        ).pack(side="left", fill="x", expand=True)
+        FlatButton(
+            hint,
+            "知道了",
+            self._dismiss_first_run_hint,
+            fonts=self.fonts,
+            font_size=9,
+            padx=9,
+            pady=3,
+            bg=ACCENT_SOFT,
+            fg=ACCENT,
+            hover_bg="#dbeafe",
+            press_bg="#c7dcff",
+        ).pack(side="right", padx=(10, 0))
+        hint.pack(fill="x", pady=(0, 10), before=self._cards_border)
+        self._first_run_hint = hint
+        log.info("首次使用：已显示启动器欢迎提示")
+
+    def _dismiss_first_run_hint(self) -> None:
+        hint = self._first_run_hint
+        self._first_run_hint = None
+        if hint is not None:
+            try:
+                hint.destroy()
+            except tk.TclError:
+                pass
+        mark = getattr(self.app, "mark_first_run_seen", None)
+        if callable(mark):
+            try:
+                mark()
+            except Exception:
+                log.exception("保存首次使用提示状态失败")
 
     def _schedule_plugin_refresh(self) -> None:
         job = self._plugin_refresh_job
@@ -1275,6 +1354,9 @@ class Launcher:
 
     # ---------------------------------------------------------------- cards
     def _on_search_changed(self, *_args) -> None:
+        # Typing changes the result set; start from the first match so Enter
+        # always has a predictable target.
+        self._selected_card_index = 0
         if self._search_job is not None:
             try:
                 self.window.after_cancel(self._search_job)
@@ -1301,6 +1383,7 @@ class Launcher:
             child.destroy()
         self._cards = []
         plugins = self._filtered_plugins()
+        self._selected_card_index = 0 if plugins else -1
         if not plugins:
             empty = tk.Frame(self.cards_frame, bg=BG)
             empty.grid(row=0, column=0, columnspan=2, sticky="nsew", padx=6, pady=20)
@@ -1341,6 +1424,7 @@ class Launcher:
                         pady=4,
                     )
                 self._cards.append(card)
+        self._apply_card_selection()
         self._update_status()
         self.cards_frame.update_idletasks()
         bbox = self.cards_canvas.bbox("all")
@@ -1477,10 +1561,77 @@ class Launcher:
         self._bind_wheel(badge)
         return card
 
-    def _on_search_enter(self, _event=None) -> None:
+    def _on_search_enter(self, _event=None) -> str:
         plugins = self._filtered_plugins()
-        if len(plugins) == 1:
-            self.open_plugin(plugins[0])
+        if not plugins:
+            return "break"
+        index = self._selected_card_index
+        if not 0 <= index < len(plugins):
+            index = 0
+        self.open_plugin(plugins[index])
+        return "break"
+
+    def _on_escape(self, _event=None) -> str:
+        # First Esc clears a search; a second one hides the launcher. This is
+        # the usual launcher behaviour and avoids losing a typed query.
+        try:
+            query = self.search_var.get()
+        except tk.TclError:
+            query = ""
+        if query:
+            self.search_var.set("")
+            self._focus_search()
+            return "break"
+        self.hide()
+        return "break"
+
+    def _move_selection(self, delta: int) -> str:
+        count = len(self._cards)
+        if not count:
+            return "break"
+        current = self._selected_card_index
+        if not 0 <= current < count:
+            current = 0
+        self._selected_card_index = (current + delta) % count
+        self._apply_card_selection()
+        self._see_selected_card()
+        return "break"
+
+    def _apply_card_selection(self) -> None:
+        index = self._selected_card_index
+        for position, card in enumerate(self._cards):
+            selected = position == index
+            try:
+                card.configure(
+                    highlightbackground=ACCENT if selected else BORDER,
+                    highlightcolor=ACCENT if selected else BORDER,
+                    highlightthickness=2 if selected else 1,
+                )
+            except tk.TclError:
+                pass
+
+    def _see_selected_card(self) -> None:
+        index = self._selected_card_index
+        if not 0 <= index < len(self._cards):
+            return
+        card = self._cards[index]
+        try:
+            self.cards_canvas.update_idletasks()
+            bbox = self.cards_canvas.bbox("all")
+            if not bbox:
+                return
+            total = max(1, bbox[3] - bbox[1])
+            top = card.winfo_y()
+            height = card.winfo_height()
+            view_top = self.cards_canvas.canvasy(0)
+            view_height = self.cards_canvas.winfo_height()
+            if top < view_top:
+                self.cards_canvas.yview_moveto(max(0.0, top / total))
+            elif top + height > view_top + view_height:
+                target = (top + height - view_height) / total
+                self.cards_canvas.yview_moveto(max(0.0, min(1.0, target)))
+        except tk.TclError:
+            pass
 
     def _on_cards_configure(self, _event=None) -> None:
         bbox = self.cards_canvas.bbox("all")

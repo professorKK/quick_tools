@@ -117,6 +117,11 @@ class HotkeyManager:
                 "Ctrl+Space 与中文输入法冲突；Win32 原生热键会独占该组合，"
                 "建议在设置中改用 Ctrl+Alt+Space"
             )
+        if spec.modifiers == ("alt",) and spec.key == "space":
+            log.warning(
+                "Alt+Space 会占用 Windows 的系统窗口菜单；"
+                "如与其他软件冲突，可在设置中改绑"
+            )
         log.info("全局快捷键已注册：%s（Win32 RegisterHotKey）", spec.display())
         return True
 

@@ -191,6 +191,17 @@ class QuickToolsApp:
     def hotkey_status_warning(self) -> bool:
         return not self.hotkey.running
 
+    def mark_first_run_seen(self) -> None:
+        """Persist that the launcher welcome hint has been dismissed."""
+        if self.settings.first_run_seen:
+            return
+        updated = replace(self.settings, first_run_seen=True)
+        try:
+            save_settings(updated)
+        except Exception:
+            log.exception("保存首次使用提示状态失败")
+        self.settings = updated
+
     def _refresh_status_ui(self) -> None:
         try:
             self.launcher.update_hotkey_status(
@@ -278,6 +289,7 @@ class QuickToolsApp:
         *,
         merge: bool = False,
         progress=None,
+        should_cancel=None,
     ) -> tuple[MigrationResult, AppSettings]:
         """Filesystem/config-only migration; safe to call from a worker."""
         _stored, effective = normalize_plugin_data_root(
@@ -285,7 +297,11 @@ class QuickToolsApp:
         )
         old_root = paths.plugin_data_root(base_settings.plugin_data_root)
         result = migrate_plugin_data(
-            old_root, effective, merge=merge, progress=progress
+            old_root,
+            effective,
+            merge=merge,
+            progress=progress,
+            should_cancel=should_cancel,
         )
         new_settings = replace(
             base_settings, plugin_data_root=_stored

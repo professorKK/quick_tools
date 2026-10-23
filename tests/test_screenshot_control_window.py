@@ -25,12 +25,12 @@ pytestmark = pytest.mark.skipif(
 class FakeService:
     def __init__(self, store: RecentStore) -> None:
         self.recent = store
-        self.entries = store.list(500)
+        self.entries = store.list(None)
         self.last_status = ""
 
     def recent_entries(
         self,
-        limit: int = 8,
+        limit: int | None = 8,
         *,
         favorite: bool | None = None,
         mode: str | None = None,
@@ -40,7 +40,7 @@ class FakeService:
             entries = [item for item in entries if item.favorite is favorite]
         if mode:
             entries = [item for item in entries if item.mode == mode]
-        return entries[:limit]
+        return entries if limit is None else entries[:limit]
 
     def open_recent(self, _entry) -> None:
         pass
@@ -48,8 +48,11 @@ class FakeService:
     def copy_recent(self, _entry) -> None:
         self.last_status = "截图已复制到剪贴板"
 
-    def delete_recent(self, entry) -> None:
+    def delete_recent(self, entry) -> bool:
+        deleted = self.recent.delete(entry.id)
         self.entries = [item for item in self.entries if item.id != entry.id]
+        self.last_status = "已删除截图及文件" if deleted else "删除失败"
+        return deleted
 
     def clear_recent(self) -> None:
         self.entries = []
@@ -226,7 +229,7 @@ def _action_links(widget: tk.Misc) -> list[ActionLink]:
     return links
 
 
-def test_recent_row_actions_are_open_edit_copy(
+def test_recent_row_actions_are_open_copy_edit_favorite_delete(
     tmp_path: Path, monkeypatch
 ) -> None:
     store = RecentStore(tmp_path / "data", tmp_path / "shots")
@@ -234,7 +237,9 @@ def test_recent_row_actions_are_open_edit_copy(
         image = Image.new("RGB", (120, 80), (40, 80, 180))
         output = io.BytesIO()
         image.save(output, "PNG")
-        store.add_png(output.getvalue(), mode="region", source="test")
+        original = store.add_png(
+            output.getvalue(), mode="region", source="test"
+        )
         service = FakeService(store)
         plugin = FakePlugin(service)
         root = tk.Tk()
@@ -253,8 +258,10 @@ def test_recent_row_actions_are_open_edit_copy(
                 for link in links
             ] == [
                 ("folder", "打开"),
-                ("edit", "编辑"),
                 ("copy", "复制"),
+                ("edit", "编辑"),
+                ("star", "收藏"),
+                ("trash", "删除"),
             ]
 
             revealed: list[Path] = []
@@ -266,13 +273,75 @@ def test_recent_row_actions_are_open_edit_copy(
             monkeypatch.setattr(
                 service, "open_recent", lambda entry: edited.append(entry)
             )
+            monkeypatch.setattr(
+                "quicktools.plugins.screenshot.ui.recent_view.messagebox",
+                type(
+                    "FakeMessagebox",
+                    (),
+                    {"askyesno": staticmethod(lambda *a, **k: True)},
+                ),
+            )
 
             links[0]._command()
             links[1]._command()
+            links[2]._command()
             root.update()
 
-            assert revealed == [service.entries[0].path]
-            assert edited == [service.entries[0]]
+            assert revealed == [original.path]
+            assert edited == [original]
+            assert "已复制" in service.last_status
+
+            links[3]._command()
+            root.update()
+            assert service.entries[0].favorite is True
+            assert "已收藏" in service.last_status
+
+            links[4]._command()
+            root.update()
+            assert service.entries == []
+            assert _action_links(control.recent_view._scroll.inner) == []
+            assert not original.path.exists()
+            assert "已删除" in service.last_status
+        finally:
+            window.destroy()
+            root.destroy()
+    finally:
+        store.close()
+
+
+def test_recent_row_delete_can_be_cancelled(
+    tmp_path: Path, monkeypatch
+) -> None:
+    store = RecentStore(tmp_path / "data", tmp_path / "shots")
+    try:
+        image = Image.new("RGB", (120, 80), (20, 60, 160))
+        output = io.BytesIO()
+        image.save(output, "PNG")
+        entry = store.add_png(output.getvalue(), mode="region", source="test")
+        service = FakeService(store)
+        plugin = FakePlugin(service)
+        root = tk.Tk()
+        root.withdraw()
+        window = tk.Toplevel(root)
+        try:
+            control = ControlWindow(window, plugin)
+            control.pack(fill="both", expand=True)
+            root.update()
+
+            monkeypatch.setattr(
+                "quicktools.plugins.screenshot.ui.recent_view.messagebox",
+                type(
+                    "FakeMessagebox",
+                    (),
+                    {"askyesno": staticmethod(lambda *a, **k: False)},
+                ),
+            )
+            control.recent_view._delete(entry)
+            root.update()
+
+            assert entry.path.exists()
+            assert service.entries
+            assert len(_rows(control)) == 1
         finally:
             window.destroy()
             root.destroy()

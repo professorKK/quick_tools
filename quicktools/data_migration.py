@@ -36,6 +36,14 @@ class PluginDataConflictError(PluginDataError):
         )
 
 
+class PluginDataCancelled(PluginDataError):
+    """Raised when the user cancels a running migration.
+
+    ``migrate_plugin_data()`` rolls back before raising this, so callers can
+    simply restart the plugins with the old root.
+    """
+
+
 @dataclass(frozen=True)
 class MigrationProgress:
     plugin_id: str
@@ -46,6 +54,7 @@ class MigrationProgress:
 
 
 ProgressCallback = Callable[[MigrationProgress], None]
+CancelCallback = Callable[[], bool]
 
 
 @dataclass
@@ -196,9 +205,14 @@ def _copy_tree(
     counts: list[int],
     progress: ProgressCallback | None,
     created_files: list[Path],
+    should_cancel: CancelCallback | None = None,
 ) -> None:
     files_done, bytes_done, files_total, bytes_total = counts
     last_emit = 0.0
+
+    def check_cancel() -> None:
+        if should_cancel is not None and should_cancel():
+            raise PluginDataCancelled("已取消插件数据迁移")
 
     def emit(force: bool = False) -> None:
         nonlocal last_emit
@@ -234,6 +248,7 @@ def _copy_tree(
         # Keep deterministic traversal; symlinked dirs are not followed.
         dirs[:] = [name for name in dirs if not (Path(root) / name).is_symlink()]
         for name in names:
+            check_cancel()
             src = Path(root) / name
             dst = target_dir / name
             try:
@@ -270,6 +285,7 @@ def migrate_plugin_data(
     *,
     merge: bool = False,
     progress: ProgressCallback | None = None,
+    should_cancel: CancelCallback | None = None,
 ) -> MigrationResult:
     source_root = Path(source_root).resolve()
     dest_root = Path(dest_root).resolve()
@@ -308,6 +324,8 @@ def migrate_plugin_data(
             )
     same_device = _same_device(source_root, dest_root)
     for entry in sorted(plugin_dirs, key=lambda item: item.name):
+        if should_cancel is not None and should_cancel():
+            raise PluginDataCancelled("已取消插件数据迁移")
         source = Path(entry.path)
         target = dest_root / entry.name
         if target.exists() and any(target.iterdir()):
@@ -354,6 +372,7 @@ def migrate_plugin_data(
                     counts=counts,
                     progress=progress,
                     created_files=result._created_files,
+                    should_cancel=should_cancel,
                 )
                 if target.exists():
                     target.rmdir()
@@ -370,6 +389,7 @@ def migrate_plugin_data(
                     counts=counts,
                     progress=progress,
                     created_files=result._created_files,
+                    should_cancel=should_cancel,
                 )
                 result.merged.append(entry.name)
             result.methods[entry.name] = mode

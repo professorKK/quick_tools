@@ -17,6 +17,7 @@ def test_defaults_and_hotkey() -> None:
     settings = ScreenshotSettings()
     assert settings.image_format == "png"
     assert settings.window_margin_px == 0
+    assert settings.auto_copy is True
     assert settings.hotkey.display() == "Ctrl+Alt+X"
     assert settings.resolved_save_dir() == default_save_dir()
 
@@ -64,11 +65,13 @@ def test_roundtrip_and_corruption(tmp_path: Path) -> None:
         jpeg_quality=80,
         recent_limit=42,
         window_margin_px=37,
+        auto_copy=False,
     )
     saved = save_settings(tmp_path, settings)
     loaded = load_settings(tmp_path)
     assert loaded == saved
     assert loaded.window_margin_px == 37
+    assert loaded.auto_copy is False
     assert loaded.hotkey.display() == "Ctrl+Shift+A"
 
     path = settings_path(tmp_path)

@@ -203,6 +203,25 @@ def test_editor_close_copies_the_rendered_image(root: tk.Tk) -> None:
     assert closed == [True]
 
 
+def test_editor_close_does_not_copy_when_disabled(root: tk.Tk) -> None:
+    copied: list[Image.Image] = []
+    editor = CaptureEditor(
+        root,
+        Image.new("RGB", (120, 80), "white"),
+        ScreenshotSettings(auto_copy=False),
+        on_copy=copied.append,
+        on_save=lambda _image, _path: None,
+        on_close=lambda _return: None,
+    )
+    editor.withdraw()
+    root.update()
+
+    editor.close()
+    root.update()
+
+    assert copied == []
+
+
 def test_editor_close_and_return(root: tk.Tk) -> None:
     image = Image.new("RGB", (120, 80), (5, 6, 7))
     closed: list[bool] = []

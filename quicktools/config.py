@@ -103,9 +103,13 @@ class HotkeySpec:
 
     @classmethod
     def default(cls, platform: str | None = None) -> "HotkeySpec":
-        """Platform default: Linux avoids the common IME Ctrl+Space chord."""
+        """Platform default.
+
+        Windows uses Alt+Space per the product decision; Linux avoids the
+        common IME Ctrl+Space chord with Ctrl+Alt+Space.
+        """
         current = sys.platform if platform is None else platform
-        modifiers = ("ctrl",) if current == "win32" else ("ctrl", "alt")
+        modifiers = ("alt",) if current == "win32" else ("ctrl", "alt")
         return cls(modifiers, "space")
 
     @classmethod
@@ -139,6 +143,9 @@ class AppSettings:
     # Empty means the platform default plugin_data directory. A non-empty
     # value is the parent directory containing all plugins' data folders.
     plugin_data_root: str = ""
+    # Set after the launcher's one-time welcome banner is dismissed. Older
+    # settings.json files do not contain the key, so they show the hint once.
+    first_run_seen: bool = False
 
     @classmethod
     def default(cls) -> "AppSettings":
@@ -149,6 +156,7 @@ class AppSettings:
             "version": 1,
             "hotkey": self.hotkey.to_mapping(),
             "plugin_data_root": self.plugin_data_root,
+            "first_run_seen": self.first_run_seen,
         }
 
     @classmethod
@@ -163,6 +171,7 @@ class AppSettings:
                 if isinstance(raw_root, str) and raw_root.strip()
                 else ""
             ),
+            first_run_seen=data.get("first_run_seen") is True,
         )
 
 

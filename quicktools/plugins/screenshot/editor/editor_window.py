@@ -94,10 +94,16 @@ class CaptureEditor(tk.Toplevel):
         nav_has_newer: bool = False,
         nav_has_older: bool = False,
         initial_tool: Tool | None = None,
+        auto_copy_on_close: bool | None = None,
     ) -> None:
         super().__init__(root)
         self.image = image.copy()
         self.settings = settings
+        self.auto_copy_on_close = (
+            bool(settings.auto_copy)
+            if auto_copy_on_close is None
+            else bool(auto_copy_on_close)
+        )
         self.on_copy = on_copy
         self.on_save = on_save
         self.on_autosave = on_autosave
@@ -775,12 +781,10 @@ class CaptureEditor(tk.Toplevel):
         self._flash_copy_button()
 
     def _copy_on_close(self) -> None:
-        """Copy the final image before the editor closes.
-
-        Closing ends the screenshot workflow and users immediately paste the
-        result, so they should not need to press "复制" first.  A clipboard
-        failure is logged but must never block closing.
-        """
+        """Copy the final image before the editor closes when enabled."""
+        if not self.auto_copy_on_close:
+            log.info("用户操作：关闭编辑器时未复制截图（设置已关闭）")
+            return
         try:
             self._canvas.commit_pending_entry()
             rendered = self._canvas.render()

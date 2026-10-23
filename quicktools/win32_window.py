@@ -136,6 +136,45 @@ def _work_area_from_handle(handle: int) -> tuple[int, int, int, int] | None:
         return None
 
 
+def work_area_at_point(x: int, y: int) -> tuple[int, int, int, int] | None:
+    """Return the work area of the monitor containing a screen point.
+
+    Used when a launcher is summoned while the pointer is on a secondary
+    monitor, and when the screenshot editor should open next to the capture.
+    """
+    if not is_windows():
+        return None
+    try:
+        user32 = ctypes.windll.user32
+        user32.MonitorFromPoint.argtypes = [wintypes.POINT, wintypes.DWORD]
+        user32.MonitorFromPoint.restype = wintypes.HMONITOR
+        user32.GetMonitorInfoW.argtypes = [
+            wintypes.HMONITOR,
+            ctypes.POINTER(_MONITORINFO),
+        ]
+        user32.GetMonitorInfoW.restype = wintypes.BOOL
+        point = wintypes.POINT()
+        point.x = int(x)
+        point.y = int(y)
+        monitor = user32.MonitorFromPoint(point, _MONITOR_DEFAULTTONEAREST)
+        if not monitor:
+            return None
+        info = _MONITORINFO()
+        info.cbSize = ctypes.sizeof(_MONITORINFO)
+        if not user32.GetMonitorInfoW(monitor, ctypes.byref(info)):
+            return None
+        rect = info.rcWork
+        return (
+            int(rect.left),
+            int(rect.top),
+            int(rect.right - rect.left),
+            int(rect.bottom - rect.top),
+        )
+    except Exception:
+        log.debug("读取指针所在显示器工作区失败", exc_info=True)
+        return None
+
+
 def prepare_top_level(window: tk.Misc) -> None:
     """Make a frameless window behave like a normal taskbar application.
 

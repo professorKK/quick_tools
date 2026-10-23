@@ -31,13 +31,38 @@ if not exist ".venv\Scripts\python.exe" (
 REM 启用虚拟环境，这样后面安装和打包都只用项目自己的 Python。
 call ".venv\Scripts\activate.bat"
 
-REM 如果 QuickTools.exe 正在运行，PyInstaller 会因为文件被占用而失败，
-REM 这里提前检查并给出明确提示，而不是让用户看一堆 PermissionError。
-tasklist /fi "IMAGENAME eq QuickTools.exe" 2>nul | findstr /i "QuickTools.exe" >nul
+REM 开机启动如果指向 dist\win 下的打包产物，登录后会自动启动并长期占用
+REM 打包文件；这是“每次打包都提示程序正在运行”的常见原因。
+reg query "HKCU\Software\Microsoft\Windows\CurrentVersion\Run" /v QuickTools 2>nul | findstr /i /c:"dist\win" >nul
 if not errorlevel 1 (
-  echo 检测到 QuickTools.exe 正在运行，请先从状态栏菜单退出程序后再打包。
+  echo 提示：开机启动项指向 dist\win 下的打包产物，登录后会自动启动并占用打包文件。
+  echo       开发打包时建议在应用设置中关闭开机启动，或安装到正式目录后再启用。
+)
+
+REM 程序正在运行时文件被占用，PyInstaller 会以 PermissionError 失败。
+REM 先通过 IPC 请求已运行的实例正常退出（保存窗口状态、停止插件），再等待
+REM QuickTools.exe 释放 dist\win 下的文件。单文件版运行时会同时出现引导进程、
+REM 主进程和 --tray-helper 子进程，必须等它们全部退出。
+set "QT_RUNNING="
+tasklist /fi "IMAGENAME eq QuickTools.exe" 2>nul | findstr /i "QuickTools.exe" >nul
+if not errorlevel 1 set "QT_RUNNING=1"
+if not defined QT_RUNNING goto :qt_ready_to_build
+
+echo 检测到 QuickTools.exe 正在运行，正在请求它正常退出...
+python -c "import sys; from quicktools.ipc import send_command; sys.exit(0 if send_command('quit') else 1)" >nul 2>&1
+for /l %%I in (1,1,8) do (
+  if defined QT_RUNNING (
+    ping -n 2 127.0.0.1 >nul
+    tasklist /fi "IMAGENAME eq QuickTools.exe" 2>nul | findstr /i "QuickTools.exe" >nul
+    if errorlevel 1 set "QT_RUNNING="
+  )
+)
+if defined QT_RUNNING (
+  echo 仍检测到 QuickTools.exe 正在运行，请从状态栏菜单选择“退出”后再打包。
   exit /b 1
 )
+
+:qt_ready_to_build
 
 REM 依赖已装好时跳过 pip。网络不通时 pip 会卡在下载 setuptools 的构建
 REM 隔离环境里，而且没有输出；只有缺依赖时才安装。

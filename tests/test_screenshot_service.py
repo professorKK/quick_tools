@@ -785,7 +785,7 @@ def test_delete_recent_removes_managed_file(
         managed = service.recent.image_path(entry)
         assert managed is not None
 
-        service.delete_recent(entry)
+        assert service.delete_recent(entry) is True
 
         assert not managed.exists()
         assert service.recent.get(entry.id) is None

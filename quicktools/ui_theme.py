@@ -3,13 +3,17 @@
 from __future__ import annotations
 
 import ctypes
+import re
 import shutil
 import subprocess
 import sys
+import time
 import tkinter as tk
 import tkinter.font as tkfont
+import webbrowser
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Callable
 
 BG = "#ffffff"
 PANEL = "#f6f7f9"
@@ -166,8 +170,77 @@ def pick_fonts(root: tk.Misc) -> Fonts:
     return Fonts(ui=ui, mono=mono, symbol=symbol)
 
 
+def _x11_monitor_rects() -> list[tuple[int, int, int, int]]:
+    """Best-effort XRandR monitor list, without importing python-xlib."""
+    if not sys.platform.startswith("linux"):
+        return []
+    xrandr = shutil.which("xrandr")
+    if not xrandr:
+        return []
+    try:
+        result = subprocess.run(
+            [xrandr, "--listmonitors"],
+            capture_output=True,
+            text=True,
+            timeout=2,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return []
+    if result.returncode != 0:
+        return []
+    rectangles: list[tuple[int, int, int, int]] = []
+    pattern = re.compile(
+        r"^\s*\d+:\s+[+*]*\S+\s+(\d+)/\d+x(\d+)/\d+\+(-?\d+)\+(-?\d+)"
+    )
+    for line in result.stdout.splitlines():
+        match = pattern.match(line)
+        if not match:
+            continue
+        width, height, x, y = (int(value) for value in match.groups())
+        rectangles.append((x, y, width, height))
+    return rectangles
+
+
+_x11_monitor_cache: tuple[float, list[tuple[int, int, int, int]]] = (0.0, [])
+
+
+def work_area_for_point(
+    point: tuple[int, int] | None,
+) -> tuple[int, int, int, int] | None:
+    """Return the monitor work area containing ``point`` when known.
+
+    The fallback is None so callers keep using Tk's primary-screen bounds.
+    """
+    if point is None:
+        return None
+    if sys.platform == "win32":
+        try:
+            from .win32_window import work_area_at_point
+
+            return work_area_at_point(*point)
+        except Exception:
+            return None
+    if sys.platform.startswith("linux"):
+        global _x11_monitor_cache
+        now = time.monotonic()
+        cached_at, rectangles = _x11_monitor_cache
+        if now - cached_at > 5.0:
+            rectangles = _x11_monitor_rects()
+            _x11_monitor_cache = (now, rectangles)
+        for x, y, width, height in rectangles:
+            if x <= point[0] < x + width and y <= point[1] < y + height:
+                return (x, y, width, height)
+    return None
+
+
 def center_on_screen(
-    window: tk.Toplevel | tk.Tk, width: int, height: int, parent: tk.Misc | None = None
+    window: tk.Toplevel | tk.Tk,
+    width: int,
+    height: int,
+    parent: tk.Misc | None = None,
+    *,
+    anchor_point: tuple[int, int] | None = None,
 ) -> None:
     window.update_idletasks()
     if parent is not None:
@@ -179,14 +252,33 @@ def center_on_screen(
             if pw > 10 and ph > 10:
                 x = px + (pw - width) // 2
                 y = py + (ph - height) // 2
-                x = max(0, min(x, window.winfo_screenwidth() - width))
-                y = max(0, min(y, window.winfo_screenheight() - height))
+                area = work_area_for_point((px, py)) or (
+                    0,
+                    0,
+                    window.winfo_screenwidth(),
+                    window.winfo_screenheight(),
+                )
+                left, top, area_width, area_height = area
+                x = max(left, min(x, left + max(0, area_width - width)))
+                y = max(top, min(y, top + max(0, area_height - height)))
                 window.geometry(f"{width}x{height}+{x}+{y}")
                 return
         except tk.TclError:
             pass
-    x = max(0, (window.winfo_screenwidth() - width) // 2)
-    y = max(0, (window.winfo_screenheight() - height) // 2)
+    point = anchor_point
+    if point is None:
+        try:
+            point = (window.winfo_pointerx(), window.winfo_pointery())
+        except tk.TclError:
+            point = None
+    area = work_area_for_point(point)
+    if area is not None:
+        left, top, area_width, area_height = area
+        x = left + max(0, (area_width - width) // 2)
+        y = top + max(0, (area_height - height) // 2)
+    else:
+        x = max(0, (window.winfo_screenwidth() - width) // 2)
+        y = max(0, (window.winfo_screenheight() - height) // 2)
     window.geometry(f"{width}x{height}+{x}+{y}")
 
 
@@ -198,6 +290,19 @@ def open_in_file_manager(path: Path) -> None:
         os.startfile(str(path))  # type: ignore[attr-defined]
     else:
         subprocess.Popen(["xdg-open", str(path)])
+
+
+def open_url(url: str) -> bool:
+    """Open ``url`` in the platform default browser.
+
+    Returns ``False`` when no browser could be launched (for example on a
+    headless machine) so callers can show a manual fallback instead of
+    crashing the UI.
+    """
+    try:
+        return bool(webbrowser.open(url))
+    except Exception:
+        return False
 
 
 def reveal_in_file_manager(path: Path) -> None:
@@ -421,3 +526,83 @@ class FlatButton(tk.Label):
             self._idle_press_bg = press_bg
         if self._enabled:
             self._apply_style()
+
+
+class LinkLabel(tk.Label):
+    """A focus-free text link that underlines on hover and opens on click.
+
+    Used for external addresses (such as the GitHub repository) that must be
+    visible as plain text and clickable without stealing the keyboard focus
+    from entries in the same window.
+    """
+
+    def __init__(
+        self,
+        master: tk.Misc,
+        text: str,
+        command: Callable[[], None],
+        *,
+        fonts: Fonts | None = None,
+        font_size: int = 9,
+        fg: str = ACCENT,
+        bg: str = BG,
+        active_fg: str = ACCENT_DARK,
+        **kwargs,
+    ) -> None:
+        self._command = command
+        self._enabled = True
+        self._pressed = False
+        family, size, weight = (
+            fonts or Fonts("TkDefaultFont", "TkFixedFont")
+        ).u(font_size)
+        self._idle_font = (family, size, weight)
+        style = " ".join(
+            part for part in (weight, "underline") if part and part != "normal"
+        )
+        self._hover_font = (family, size, style or "underline")
+        super().__init__(
+            master,
+            text=text,
+            bg=bg,
+            fg=fg,
+            activeforeground=active_fg,
+            font=self._idle_font,
+            bd=0,
+            highlightthickness=0,
+            takefocus=0,
+            cursor="hand2",
+            **kwargs,
+        )
+        self.bind("<Enter>", self._on_enter)
+        self.bind("<Leave>", self._on_leave)
+        self.bind("<Button-1>", self._on_press)
+        self.bind("<ButtonRelease-1>", self._on_release)
+
+    def invoke(self) -> None:
+        if self._enabled:
+            self._command()
+
+    def set_enabled(self, enabled: bool) -> None:
+        self._enabled = bool(enabled)
+        self._pressed = False
+        self.configure(cursor="hand2" if self._enabled else "")
+
+    def _on_enter(self, _event=None) -> None:
+        if self._enabled:
+            self.configure(font=self._hover_font)
+
+    def _on_leave(self, _event=None) -> None:
+        self._pressed = False
+        self.configure(font=self._idle_font)
+
+    def _on_press(self, _event=None) -> None:
+        if self._enabled:
+            self._pressed = True
+
+    def _on_release(self, _event=None) -> None:
+        # Only react to a release that follows a press on this link, so a
+        # window opening under the pointer cannot leave a phantom click.
+        pressed = self._pressed
+        self._pressed = False
+        if pressed and self._enabled:
+            self.invoke()

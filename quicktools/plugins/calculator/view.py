@@ -52,8 +52,10 @@ _PAD_X = 12
 _SAVE_DEBOUNCE_MS = 400
 _KEYPAD_PADY = (2, 12)
 _KEYPAD_ROW_PAD = 14
-_STATUS_HINT = "自动计算 · Enter 新建下一层 · 支持 0x / 0b / 0o 前缀"
-_SIMPLE_STATUS_HINT = "自动计算 · Enter 新建下一层"
+_STATUS_HINT = (
+    "自动计算 · Enter 新建下一层 · 点击结果复制 · 支持 0x / 0b / 0o 前缀"
+)
+_SIMPLE_STATUS_HINT = "自动计算 · Enter 新建下一层 · 点击结果复制"
 # The selected base tag is emphasized with color, weight and size.
 _INACTIVE_TAG_SIZE = 9
 _ACTIVE_TAG_SIZE = 11
@@ -164,6 +166,7 @@ class ScratchRow(tk.Frame):
             justify="right",
             width=22,
             font=fonts.m(12),
+            cursor="hand2",
         )
         self.result_label.grid(row=0, column=1, sticky="e", padx=(3, 10))
 
@@ -191,7 +194,7 @@ class ScratchRow(tk.Frame):
         self.entry.bind("<FocusIn>", self._on_focus_in)
         self.entry.bind("<KeyPress>", self._on_key)
         self.entry.bind("<Button-1>", lambda _e: self.view.activate_row(self))
-        self.result_label.bind("<Button-1>", self._focus_end)
+        self.result_label.bind("<Button-1>", self._copy_result)
         self.stripe.bind("<Button-1>", self._focus_end)
         content.bind("<Button-1>", self._focus_end)
         view.bind_wheel(self)
@@ -232,6 +235,26 @@ class ScratchRow(tk.Frame):
         self.entry.focus_set()
         self.entry.icursor(tk.END)
         self.view.activate_row(self)
+
+    def _copy_result(self, _event=None) -> str:
+        """Copy the displayed result; a click without a result edits as before."""
+        if self.result_value is None or self.result_base is None:
+            self._focus_end()
+            return "break"
+        text = format_result(
+            self.result_value,
+            self.result_base,
+            self.view.result_group_size,
+        )
+        try:
+            self.clipboard_clear()
+            self.clipboard_append(text)
+            self.update()
+        except tk.TclError:
+            self.view.set_status("复制结果失败", error=True)
+            return "break"
+        self.view.set_status(f"已复制结果：{text}", error=False)
+        return "break"
 
     def _on_write(self, *_args) -> None:
         if self._suppress:

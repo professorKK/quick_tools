@@ -77,6 +77,7 @@ class RecentStore:
         )
         self._save_dir.mkdir(parents=True, exist_ok=True)
         self._migrate_legacy_db()
+        self._cleanup_orphan_thumbs()
 
     # ------------------------------------------------------------ lifecycle
     @property
@@ -209,11 +210,15 @@ class RecentStore:
         )
 
     def _scan(self) -> list[RecentEntry]:
+        return self._scan_entries() or []
+
+    def _scan_entries(self) -> list[RecentEntry] | None:
+        """Return managed entries, or ``None`` when the save dir can't be read."""
         try:
             files = list(self._save_dir.iterdir())
         except OSError:
             log.exception("最近截图：扫描保存目录失败 %s", self._save_dir)
-            return []
+            return None
         by_id: dict[str, RecentEntry] = {}
         for path in files:
             if not path.is_file():
@@ -280,6 +285,57 @@ class RecentStore:
     def _thumb_cache_path(self, entry_id: str) -> Path:
         safe = re.sub(r"[^0-9a-zA-Z_.-]", "_", entry_id)
         return self.thumbs_dir / f"{safe}.png"
+
+    def _cleanup_orphan_thumbs(
+        self, valid_ids: set[str] | None = None
+    ) -> int:
+        """Delete thumbnail caches whose screenshot file no longer exists.
+
+        The screenshot files are the source of truth: if the user deletes or
+        renames one outside QuickTools, its cache entry is stale. Never delete
+        anything when the save directory could not be scanned.
+        """
+        if valid_ids is None:
+            entries = self._scan_entries()
+            if entries is None:
+                return 0
+            valid_ids = {entry.id for entry in entries}
+        try:
+            items = list(os.scandir(self.thumbs_dir))
+        except OSError:
+            log.warning(
+                "最近截图：扫描缩略图缓存目录失败 %s",
+                self.thumbs_dir,
+                exc_info=True,
+            )
+            return 0
+        removed = 0
+        for item in items:
+            try:
+                if not item.is_file(follow_symlinks=False):
+                    continue
+                name = item.name
+                if name.endswith(".tmp"):
+                    # Leftover from an interrupted atomic thumbnail write.
+                    pass
+                elif name.endswith(".png"):
+                    if name[:-4] in valid_ids:
+                        continue
+                else:
+                    continue
+                Path(item.path).unlink()
+                removed += 1
+            except FileNotFoundError:
+                continue
+            except OSError:
+                log.warning(
+                    "最近截图：删除无主缩略图失败 %s",
+                    item.path,
+                    exc_info=True,
+                )
+        if removed:
+            log.info("最近截图：清理 %d 个无主缩略图缓存", removed)
+        return removed
 
     # --------------------------------------------------------------- mutate
     def add_png(
@@ -423,6 +479,7 @@ class RecentStore:
         for entry in entries:
             if self.delete(entry.id):
                 removed += 1
+        self._cleanup_orphan_thumbs()
         log.debug("最近截图：清空 %d 个文件", removed)
         return removed
 
@@ -438,7 +495,10 @@ class RecentStore:
         favorite: bool | None = None,
         mode: str | None = None,
     ) -> list[RecentEntry]:
-        entries = self._scan()
+        entries = self._scan_entries()
+        if entries is None:
+            return []
+        self._cleanup_orphan_thumbs({entry.id for entry in entries})
         if favorite is not None:
             entries = [item for item in entries if item.favorite is favorite]
         if mode:

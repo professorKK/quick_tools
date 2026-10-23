@@ -34,9 +34,9 @@ def test_screenshot_save_dir_inside_plugin_root_is_detected(
 
 def test_default_hotkey_windows() -> None:
     spec = HotkeySpec.default("win32")
-    assert spec.modifiers == ("ctrl",)
+    assert spec.modifiers == ("alt",)
     assert spec.key == "space"
-    assert spec.display() == "Ctrl+Space"
+    assert spec.display() == "Alt+Space"
 
 
 def test_default_hotkey_linux_avoids_ime_chord() -> None:
@@ -70,13 +70,16 @@ def test_invalid_hotkeys(modifiers, key) -> None:
 
 def test_save_and_load_roundtrip(tmp_path: Path) -> None:
     path = tmp_path / "settings.json"
-    settings = AppSettings(HotkeySpec(("ctrl", "alt"), "q"))
+    settings = AppSettings(
+        HotkeySpec(("ctrl", "alt"), "q"), first_run_seen=True
+    )
     save_settings(settings, path)
     loaded = load_settings(path)
     assert loaded == settings
     payload = json.loads(path.read_text(encoding="utf-8"))
     assert payload["version"] == 1
     assert payload["hotkey"]["key"] == "q"
+    assert payload["first_run_seen"] is True
 
 
 def test_corrupt_settings_fall_back_to_default(tmp_path: Path, caplog) -> None:
@@ -120,6 +123,7 @@ def test_legacy_settings_default_to_empty_plugin_root(tmp_path: Path) -> None:
         encoding="utf-8",
     )
     assert load_settings(path).plugin_data_root == ""
+    assert load_settings(path).first_run_seen is False
 
 
 def test_invalid_plugin_data_root_type_is_ignored(tmp_path: Path) -> None:

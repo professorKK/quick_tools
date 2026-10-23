@@ -11,14 +11,16 @@ from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 from typing import TYPE_CHECKING, Callable
 
-from . import __version__, autostart, paths
+from . import PROJECT_URL, __version__, autostart, paths
 from .config import HotkeySpec
 from .data_migration import (
     MigrationProgress,
+    PluginDataCancelled,
     find_plugin_data_conflicts,
     normalize_plugin_data_root,
 )
 from .modal_dialogs import open_native_file_dialog, run_modal_dialog
+from .plugin_settings import ScrollableFrame
 from .ui_theme import (
     ACCENT,
     BG,
@@ -30,8 +32,10 @@ from .ui_theme import (
     TEXT,
     FlatButton,
     Fonts,
+    LinkLabel,
     center_on_screen,
     open_in_file_manager,
+    open_url,
     pick_fonts,
 )
 from .window_frame import WindowFrame
@@ -285,11 +289,12 @@ class SettingsWindow(tk.Toplevel):
         self._migration_busy = False
         self._migration_queue: queue.Queue | None = None
         self._migration_poll_job: str | None = None
+        self._migration_cancel_event = threading.Event()
         self.title("快捷工具 · 设置")
         self.configure(bg=BG)
         self.protocol("WM_DELETE_WINDOW", self.close)
         self.bind("<Escape>", lambda _event: self.close())
-        self.minsize(620, 600)
+        self.minsize(620, 560)
         self.frame = WindowFrame(
             self,
             title="快捷工具 · 设置",
@@ -303,7 +308,9 @@ class SettingsWindow(tk.Toplevel):
             on_close=self.close,
         )
         self._build()
-        center_on_screen(self, 700, 780)
+        width = min(700, max(560, self.winfo_screenwidth() - 80))
+        height = min(780, max(520, self.winfo_screenheight() - 100))
+        center_on_screen(self, width, height)
         self.after(50, self.focus_force)
         self._refresh_plugin_section()
 
@@ -313,6 +320,58 @@ class SettingsWindow(tk.Toplevel):
         inner = tk.Frame(outer, bg=PANEL, padx=16, pady=14)
         inner.pack(fill="both", expand=True, padx=1, pady=1)
         return inner
+
+    def _build_footer(self, shell: tk.Misc) -> None:
+        footer = tk.Frame(shell, bg=BG)
+        footer.pack(fill="x", side="bottom", pady=(4, 0))
+        meta_row = tk.Frame(footer, bg=BG)
+        meta_row.pack(fill="x")
+        tk.Label(
+            meta_row,
+            text=f"QuickTools v{__version__}",
+            bg=BG,
+            fg=MUTED,
+            font=self.fonts.u(9),
+        ).pack(side="left")
+        self._quit_button = FlatButton(
+            meta_row,
+            "退出快捷工具",
+            self._quit_app,
+            fonts=self.fonts,
+            font_size=10,
+            padx=12,
+            pady=7,
+        )
+        self._quit_button.pack(side="right")
+        link_row = tk.Frame(footer, bg=BG)
+        link_row.pack(fill="x", pady=(2, 0))
+        tk.Label(
+            link_row,
+            text="开源项目：",
+            bg=BG,
+            fg=MUTED,
+            font=self.fonts.u(9),
+        ).pack(side="left")
+        self.project_link = LinkLabel(
+            link_row,
+            PROJECT_URL,
+            self._open_project_page,
+            fonts=self.fonts,
+            font_size=9,
+            bg=BG,
+        )
+        self.project_link.pack(side="left")
+
+    def _open_project_page(self) -> None:
+        """Open the public repository in the default browser."""
+        if open_url(PROJECT_URL):
+            log.info("已在浏览器中打开开源项目地址：%s", PROJECT_URL)
+            return
+        log.warning("无法打开开源项目地址：%s", PROJECT_URL)
+        self._show_error(
+            "无法打开开源项目地址",
+            "未能调起系统浏览器，请手动访问：\n" + PROJECT_URL,
+        )
 
     def _build(self) -> None:
         shell = tk.Frame(self, bg=BG, padx=20, pady=16)
@@ -336,7 +395,15 @@ class SettingsWindow(tk.Toplevel):
             font=self.fonts.u(18, "bold"),
         ).pack(side="left")
 
-        hotkey_panel = self._panel(shell)
+        # Keep the destructive/exit area fixed while the long settings page
+        # scrolls. Without this, the footer was pushed below the window on
+        # 700x780 (and could not be reached at all on 1366x768 screens).
+        self._build_footer(shell)
+        self._settings_scroll = ScrollableFrame(shell, background=BG)
+        self._settings_scroll.pack(fill="both", expand=True)
+        self._settings_body = self._settings_scroll.inner
+
+        hotkey_panel = self._panel(self._settings_body)
         tk.Label(
             hotkey_panel,
             text="全局快捷键",
@@ -390,9 +457,9 @@ class SettingsWindow(tk.Toplevel):
         tk.Label(
             hotkey_panel,
             text=(
-                "Linux 默认 Ctrl+Alt+Space；Windows 默认 Ctrl+Space。"
+                "Linux 默认 Ctrl+Alt+Space；Windows 默认 Alt+Space。"
                 "Windows 使用原生 RegisterHotKey，组合键会被独占；"
-                "若 Ctrl+Space 影响输入法切换，请改绑 Ctrl+Alt+Space。"
+                "Alt+Space 也会占用系统的窗口菜单，如冲突请在此改绑。"
                 "X11/Windows 下修改后立即生效。"
             ),
             bg=PANEL,
@@ -404,7 +471,7 @@ class SettingsWindow(tk.Toplevel):
         ).pack(anchor="w", fill="x", pady=(8, 0))
         self._refresh_hotkey_section()
 
-        autostart_panel = self._panel(shell)
+        autostart_panel = self._panel(self._settings_body)
         autostart_row = tk.Frame(autostart_panel, bg=PANEL)
         autostart_row.pack(fill="x")
         tk.Label(
@@ -444,7 +511,7 @@ class SettingsWindow(tk.Toplevel):
             font=self.fonts.u(9),
         ).pack(anchor="w", fill="x", pady=(4, 0))
 
-        data_panel = self._panel(shell)
+        data_panel = self._panel(self._settings_body)
         tk.Label(
             data_panel,
             text="插件数据",
@@ -514,6 +581,17 @@ class SettingsWindow(tk.Toplevel):
             pady=5,
         )
         self._apply_root_button.pack(side="left", padx=(8, 0))
+        self._cancel_root_button = FlatButton(
+            data_buttons,
+            "取消迁移",
+            self._cancel_data_root_migration,
+            fonts=self.fonts,
+            font_size=9,
+            padx=10,
+            pady=5,
+        )
+        self._cancel_root_button.pack(side="left", padx=(8, 0))
+        self._cancel_root_button.set_enabled(False)
         self._migration_status_var = tk.StringVar(value="")
         self._migration_status = tk.Label(
             data_panel,
@@ -534,7 +612,7 @@ class SettingsWindow(tk.Toplevel):
         self._migration_progress.pack_forget()
         self._migration_status.pack(fill="x", pady=(4, 0))
 
-        plugin_panel = self._panel(shell)
+        plugin_panel = self._panel(self._settings_body)
         tk.Label(
             plugin_panel,
             text="插件",
@@ -574,6 +652,17 @@ class SettingsWindow(tk.Toplevel):
             pady=7,
         )
         self._reload_plugins_button.pack(side="left", padx=(8, 0))
+        self._copy_plugin_errors_button = FlatButton(
+            plugin_buttons,
+            "复制错误详情",
+            self._copy_plugin_errors,
+            fonts=self.fonts,
+            font_size=10,
+            padx=12,
+            pady=7,
+        )
+        self._copy_plugin_errors_button.pack(side="left", padx=(8, 0))
+        self._copy_plugin_errors_button.set_enabled(False)
         self.plugin_info_var = tk.StringVar()
         tk.Label(
             plugin_panel,
@@ -610,26 +699,7 @@ class SettingsWindow(tk.Toplevel):
             font=self.fonts.u(9),
         ).pack(anchor="w", fill="x", pady=(6, 0))
 
-        footer = tk.Frame(shell, bg=BG)
-        footer.pack(fill="x", side="bottom", pady=(4, 0))
-        tk.Label(
-            footer,
-            text=f"QuickTools v{__version__}",
-            bg=BG,
-            fg=MUTED,
-            font=self.fonts.u(9),
-        ).pack(side="left")
-        self._quit_button = FlatButton(
-            footer,
-            "退出快捷工具",
-            self._quit_app,
-            fonts=self.fonts,
-            font_size=10,
-            padx=12,
-            pady=7,
-        )
-        self._quit_button.pack(side="right")
-
+        self._settings_scroll.bind_wheel()
         self._refresh_autostart_section()
 
     def _refresh_hotkey_section(self) -> None:
@@ -647,13 +717,31 @@ class SettingsWindow(tk.Toplevel):
         self.error_text.configure(state="normal")
         self.error_text.delete("1.0", "end")
         if errors:
-            self.error_text.insert("1.0", "\n".join(errors))
+            self.error_text.insert(
+                "1.0",
+                "以下插件未能加载，可打开插件目录检查：\n\n"
+                + "\n".join(errors),
+            )
             self.error_text.configure(fg=DANGER)
         else:
             self.error_text.insert("1.0", "未发现插件加载错误。")
             self.error_text.configure(fg=MUTED)
         self.error_text.configure(state="disabled")
+        self._copy_plugin_errors_button.set_enabled(bool(errors))
         self._refresh_hotkey_section()
+
+    def _copy_plugin_errors(self) -> None:
+        text = self.error_text.get("1.0", "end-1c").strip()
+        if not text:
+            return
+        try:
+            self.clipboard_clear()
+            self.clipboard_append(text)
+            self.update()
+        except tk.TclError as exc:
+            self._show_error("复制失败", str(exc))
+            return
+        self.plugin_info_var.set("插件错误详情已复制到剪贴板。")
 
     def _refresh_autostart_section(self) -> None:
         if not autostart.is_supported():
@@ -788,6 +876,7 @@ class SettingsWindow(tk.Toplevel):
             self._quit_button,
         ):
             button.set_enabled(not busy)
+        self._cancel_root_button.set_enabled(busy)
         if busy:
             self._migration_progress.pack(fill="x", pady=(8, 0))
             self._migration_progress.configure(value=0)
@@ -870,6 +959,7 @@ class SettingsWindow(tk.Toplevel):
             self._show_error("停止插件失败", str(exc))
             return
         self._migration_queue = queue.Queue()
+        self._migration_cancel_event.clear()
 
         def worker() -> None:
             try:
@@ -878,6 +968,7 @@ class SettingsWindow(tk.Toplevel):
                     str(effective),
                     merge=merge,
                     progress=self._migration_queue.put,
+                    should_cancel=self._migration_cancel_event.is_set,
                 )
                 self._migration_queue.put(
                     ("done", result, new_settings, str(effective))
@@ -902,6 +993,14 @@ class SettingsWindow(tk.Toplevel):
             self.app.end_data_migration()
             self._set_migration_busy(False)
             self._show_error("插件数据迁移失败", str(exc))
+
+    def _cancel_data_root_migration(self) -> None:
+        if not self._migration_busy:
+            return
+        self._migration_cancel_event.set()
+        self._cancel_root_button.set_enabled(False)
+        self._migration_status_var.set("正在取消迁移，数据将恢复原目录…")
+        log.info("用户操作：取消插件数据迁移")
 
     def _poll_data_root_migration(self) -> None:
         self._migration_poll_job = None
@@ -971,11 +1070,21 @@ class SettingsWindow(tk.Toplevel):
                 finally:
                     self.app.end_data_migration()
                 self._set_migration_busy(False)
+                self.data_root_var.set(
+                    str(self.app.current_plugin_data_root())
+                )
+                error = item[1]
+                if isinstance(error, PluginDataCancelled):
+                    log.info("插件数据迁移已由用户取消")
+                    self._migration_status_var.set(
+                        "迁移已取消，数据已恢复原目录。"
+                    )
+                    return
                 self._migration_status_var.set(
                     "迁移失败，已恢复原数据目录。"
                 )
                 self._show_error(
-                    "插件数据迁移失败", str(item[1])
+                    "插件数据迁移失败", str(error)
                 )
                 return
         self._migration_poll_job = self.after(

@@ -6,14 +6,18 @@ import logging
 import time
 import tkinter as tk
 from datetime import datetime
+from tkinter import messagebox
 from typing import TYPE_CHECKING, Callable
 
 from PIL import Image, ImageTk
 
+from quicktools.modal_dialogs import run_modal_dialog
 from quicktools.ui_theme import (
+    ACCENT,
     BG,
     BORDER,
     BUTTON,
+    DANGER,
     FlatButton,
     MUTED,
     TEXT,
@@ -125,7 +129,7 @@ class RecentView(tk.Frame):
         search = PlaceholderEntry(
             header,
             self.fonts,
-            placeholder="搜索截图名称、内容...",
+            placeholder="搜索截图名称、模式、日期…",
             textvariable=self._search_var,
             icons=self.icons,
             background=BG,
@@ -230,7 +234,7 @@ class RecentView(tk.Frame):
         if service is not None:
             favorite, mode = self._filter_args()
             entries = service.recent_entries(
-                limit=500, favorite=favorite, mode=mode
+                limit=None, favorite=favorite, mode=mode
             )
         else:
             log.warning("最近截图：截图服务未启动，无法刷新列表")
@@ -268,7 +272,7 @@ class RecentView(tk.Frame):
         if query:
             text = "没有匹配的最近截图。"
         elif self._filter_var.get() == "favorite":
-            text = "还没有收藏的截图。\n点击截图右侧的星标即可收藏。"
+            text = "还没有收藏的截图。\n点击截图右侧的“收藏”即可收藏。"
         elif self._filter_var.get() in _MODE_VALUES:
             text = "没有该模式的截图。"
         else:
@@ -361,25 +365,27 @@ class RecentView(tk.Frame):
             font=self.fonts.u(8),
         ).pack(anchor="w", pady=(2, 0))
 
-        star = tk.Label(
-            row,
-            bg=BG,
-            cursor="hand2",
-            image=self.icons.get(
-                "star-filled" if entry.favorite else "star",
-                20,
-                _STAR_COLOR if entry.favorite else MUTED,
-            ),
-        )
-        star.pack(side="right", padx=(8, 2))
-        star.bind("<Button-1>", lambda _event, e=entry: self._toggle_favorite(e))
-
         actions = tk.Frame(row, bg=BG)
         actions.pack(side="right", padx=(4, 4))
-        for icon_name, text, command in (
-            ("folder", "打开", lambda e=entry: self._reveal(e)),
-            ("edit", "编辑", lambda e=entry: self._edit(e)),
-            ("copy", "复制", lambda e=entry: self._copy(e)),
+        favorite_color = _STAR_COLOR if entry.favorite else MUTED
+        for icon_name, text, command, color, hover_color in (
+            ("folder", "打开", lambda e=entry: self._reveal(e), MUTED, ACCENT),
+            ("copy", "复制", lambda e=entry: self._copy(e), MUTED, ACCENT),
+            ("edit", "编辑", lambda e=entry: self._edit(e), MUTED, ACCENT),
+            (
+                "star-filled" if entry.favorite else "star",
+                "已收藏" if entry.favorite else "收藏",
+                lambda e=entry: self._toggle_favorite(e),
+                favorite_color,
+                ACCENT,
+            ),
+            (
+                "trash",
+                "删除",
+                lambda e=entry: self._delete(e),
+                DANGER,
+                DANGER,
+            ),
         ):
             ActionLink(
                 actions,
@@ -389,6 +395,8 @@ class RecentView(tk.Frame):
                 fonts=self.fonts,
                 icons=self.icons,
                 bg=BG,
+                color=color,
+                hover_color=hover_color,
             ).pack(side="left", padx=(6, 0))
         return row
 
@@ -472,6 +480,43 @@ class RecentView(tk.Frame):
         else:
             status = getattr(service, "last_status", "")
             self._toast(status or "收藏失败", True)
+
+    def _confirm_delete(self, entry) -> bool:
+        message = (
+            "确定删除这张截图及其文件吗？\n\n"
+            f"{entry.name}\n\n"
+            "此操作不可撤销。"
+        )
+        try:
+            return bool(
+                run_modal_dialog(
+                    self,
+                    lambda parent: messagebox.askyesno(
+                        "删除截图", message, parent=parent
+                    ),
+                )
+            )
+        except Exception:
+            log.exception("删除最近截图的确认框失败：id=%s", entry.id)
+            return False
+
+    def _delete(self, entry) -> None:
+        log.info("用户操作：删除最近截图 %s", self._describe(entry))
+        if not self._confirm_delete(entry):
+            log.info("用户操作：取消删除最近截图 id=%s", entry.id)
+            return
+        service = self.plugin.service
+        if service is None:
+            log.warning("删除最近截图失败：截图服务未启动")
+            self._toast("截图服务未启动", True)
+            return
+        deleted = service.delete_recent(entry)
+        self.refresh()
+        if deleted:
+            self._toast("已删除截图")
+            return
+        status = getattr(service, "last_status", "")
+        self._toast(status or "删除截图失败", True)
 
     def _clear(self) -> None:
         log.info("用户操作：最近截图列表点击清空全部")

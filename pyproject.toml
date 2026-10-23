@@ -18,6 +18,10 @@ dependencies = [
 [project.optional-dependencies]
 dev = ["pytest>=8,<9"]
 
+[project.urls]
+Homepage = "https://github.com/professorKK/quick_tools"
+Repository = "https://github.com/professorKK/quick_tools"
+
 [project.scripts]
 quicktools = "quicktools.__main__:main"
 

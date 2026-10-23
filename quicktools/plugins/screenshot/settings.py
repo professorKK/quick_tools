@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import ctypes
 import json
 import logging
 import os
 import sys
 import tempfile
+import uuid
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
@@ -17,6 +19,7 @@ log = logging.getLogger(__name__)
 
 SETTINGS_FILE = "settings.json"
 IMAGE_FORMATS = ("png", "jpeg", "webp")
+_FOLDERID_PICTURES = "33e28130-4e1e-4676-835a-98395c3bc3bb"
 
 
 def _default_hotkey() -> HotkeySpec:
@@ -45,10 +48,54 @@ def _xdg_pictures_dir() -> Path | None:
     return None
 
 
+def _windows_pictures_dir() -> Path | None:
+    """Return the real Pictures known folder, including OneDrive redirects."""
+    if sys.platform != "win32":
+        return None
+    try:
+        from ctypes import wintypes
+
+        shell32 = ctypes.windll.shell32
+        ole32 = ctypes.windll.ole32
+        shell32.SHGetKnownFolderPath.argtypes = [
+            ctypes.c_void_p,
+            wintypes.DWORD,
+            wintypes.HANDLE,
+            ctypes.POINTER(ctypes.c_wchar_p),
+        ]
+        shell32.SHGetKnownFolderPath.restype = ctypes.c_long
+        ole32.CoTaskMemFree.argtypes = [ctypes.c_void_p]
+        ole32.CoTaskMemFree.restype = None
+
+        folder_id = ctypes.create_string_buffer(
+            uuid.UUID(_FOLDERID_PICTURES).bytes_le, 16
+        )
+        result = ctypes.c_wchar_p()
+        status = shell32.SHGetKnownFolderPath(
+            ctypes.byref(folder_id),
+            0,
+            None,
+            ctypes.byref(result),
+        )
+        if status != 0 or not result.value:
+            return None
+        try:
+            return Path(result.value)
+        finally:
+            ole32.CoTaskMemFree(result)
+    except Exception:
+        log.debug("读取 Windows 图片库目录失败，回退到用户目录", exc_info=True)
+        return None
+
+
 def default_save_dir() -> Path:
     if sys.platform == "win32":
-        base = Path(os.environ.get("USERPROFILE", str(Path.home())))
-        return base / "Pictures" / "Screenshots"
+        base = _windows_pictures_dir()
+        if base is None:
+            base = Path(
+                os.environ.get("USERPROFILE", str(Path.home()))
+            ) / "Pictures"
+        return base / "Screenshots"
     pictures = _xdg_pictures_dir() or (Path.home() / "Pictures")
     return pictures / "Screenshots"
 
@@ -60,7 +107,7 @@ class ScreenshotSettings:
     save_dir: str = ""
     image_format: str = "png"
     jpeg_quality: int = 92
-    auto_copy: bool = False
+    auto_copy: bool = True
     auto_save: bool = False
     # Kept for settings.json compatibility. The file-backed recent list never
     # auto-deletes screenshots, so these limits are no longer enforced.
@@ -146,7 +193,7 @@ class ScreenshotSettings:
             save_dir=str(data.get("save_dir") or ""),
             image_format=str(data.get("image_format") or "png"),
             jpeg_quality=_int(data.get("jpeg_quality"), 92),
-            auto_copy=_bool(data.get("auto_copy"), False),
+            auto_copy=_bool(data.get("auto_copy"), True),
             auto_save=_bool(data.get("auto_save"), False),
             recent_limit=_int(data.get("recent_limit"), 100),
             recent_max_mb=_int(data.get("recent_max_mb"), 500),

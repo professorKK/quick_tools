@@ -226,6 +226,68 @@ def test_migrates_legacy_database_once(tmp_path: Path) -> None:
         second.close()
 
 
+def test_manually_deleted_source_removes_thumbnail_cache(
+    tmp_path: Path,
+) -> None:
+    store = make_store(tmp_path)
+    try:
+        entry = store.add_png(png_bytes(200, 100), mode="region")
+        thumb = store.thumb_path(entry)
+        assert thumb is not None and thumb.exists()
+
+        entry.path.unlink()
+        assert store.list() == []
+
+        assert not thumb.exists()
+    finally:
+        store.close()
+
+
+def test_cleanup_removes_orphan_cache_and_temp_files(
+    tmp_path: Path,
+) -> None:
+    store = make_store(tmp_path)
+    try:
+        entry = store.add_png(png_bytes(200, 100), mode="region")
+        thumb = store.thumb_path(entry)
+        assert thumb is not None and thumb.exists()
+        orphan = store.thumbs_dir / "legacy_hash.png"
+        orphan.write_bytes(b"stale")
+        stale_tmp = store.thumbs_dir / ".thumb.png.interrupted.tmp"
+        stale_tmp.write_bytes(b"stale")
+        unrelated = store.thumbs_dir / "notes.txt"
+        unrelated.write_text("keep", encoding="utf-8")
+
+        assert store.list() == [entry]
+
+        assert not orphan.exists()
+        assert not stale_tmp.exists()
+        assert unrelated.exists()
+        assert thumb.exists()
+    finally:
+        store.close()
+
+
+def test_cleanup_keeps_thumbs_when_save_dir_unreadable(
+    tmp_path: Path, monkeypatch
+) -> None:
+    store = make_store(tmp_path)
+    try:
+        entry = store.add_png(png_bytes(200, 100), mode="region")
+        thumb = store.thumb_path(entry)
+        assert thumb is not None and thumb.exists()
+        orphan = store.thumbs_dir / "legacy_hash.png"
+        orphan.write_bytes(b"stale")
+
+        monkeypatch.setattr(store, "_scan_entries", lambda: None)
+        assert store._cleanup_orphan_thumbs() == 0
+
+        assert thumb.exists()
+        assert orphan.exists()
+    finally:
+        store.close()
+
+
 def test_thumb_cache_is_generated(tmp_path: Path) -> None:
     store = make_store(tmp_path)
     try:

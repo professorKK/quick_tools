@@ -1014,7 +1014,7 @@ class ScreenshotService:
     # -------------------------------------------------------------- recent
     def recent_entries(
         self,
-        limit: int = 8,
+        limit: int | None = 8,
         *,
         favorite: bool | None = None,
         mode: str | None = None,
@@ -1239,27 +1239,28 @@ class ScreenshotService:
             return
         self._report("截图已复制到剪贴板")
 
-    def delete_recent(self, entry: RecentEntry) -> None:
+    def delete_recent(self, entry: RecentEntry) -> bool:
         log.info("用户操作：删除最近截图 id=%s，文件=%s", entry.id, entry.path)
         recent = self.recent
         if recent is None:
             log.warning("删除最近截图失败：截图服务未启动")
             self._report("截图服务未启动")
-            return
+            return False
         try:
             deleted = recent.delete(entry.id)
         except Exception:
             log.exception("删除最近截图文件失败：id=%s", entry.id)
             self._report("删除截图失败，详见日志")
-            return
+            return False
         if not deleted:
             log.warning(
                 "删除最近截图失败：记录 id=%s 不存在或文件无法删除", entry.id
             )
             self._report("删除失败：文件不存在或无法删除")
-            return
+            return False
         log.info("最近截图：已删除文件 id=%s", entry.id)
         self._report("已删除截图及文件")
+        return True
 
     def clear_recent(self) -> None:
         log.info("用户操作：清空最近截图")

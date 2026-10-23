@@ -6,6 +6,7 @@ import pytest
 
 from quicktools import data_migration
 from quicktools.data_migration import (
+    PluginDataCancelled,
     PluginDataConflictError,
     PluginDataError,
     find_plugin_data_conflicts,
@@ -114,6 +115,31 @@ def test_cross_device_copy_and_finalize(
     assert not list(dest.glob("*.qt-migrate.tmp"))
     result.finalize()
     assert not (source / "clipboard").exists()
+
+
+def test_cancelled_copy_rolls_back_before_raising(
+    tmp_path: Path, monkeypatch
+) -> None:
+    source = tmp_path / "old"
+    dest = tmp_path / "new"
+    seed(source)
+    monkeypatch.setattr(
+        data_migration, "_same_device", lambda _a, _b: False
+    )
+    calls = 0
+
+    def should_cancel() -> bool:
+        nonlocal calls
+        calls += 1
+        return calls > 1
+
+    with pytest.raises(PluginDataCancelled):
+        migrate_plugin_data(source, dest, should_cancel=should_cancel)
+
+    assert (source / "calculator" / "settings.json").exists()
+    assert (source / "clipboard" / "history.db").exists()
+    assert not (dest / "calculator").exists()
+    assert not (dest / "clipboard").exists()
 
 
 def test_rename_rollback_restores_source(tmp_path: Path) -> None:

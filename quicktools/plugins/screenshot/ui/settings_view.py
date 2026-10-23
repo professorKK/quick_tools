@@ -357,7 +357,6 @@ class ScreenshotSettingsPanel(tk.Frame):
             description="仅 JPEG 格式使用，数值越高文件越大。",
             bg=CARD_BG,
             fonts=self.fonts,
-            last=True,
         )
         quality_row.pack(fill="x")
         self.quality_var = tk.StringVar(value=str(self.settings.jpeg_quality))
@@ -368,6 +367,17 @@ class ScreenshotSettingsPanel(tk.Frame):
             textvariable=self.quality_var,
             width=8,
         ).pack()
+
+        self.auto_copy_var = tk.BooleanVar(value=self.settings.auto_copy)
+        ToggleRow(
+            save_body,
+            "关闭编辑器时复制到剪贴板",
+            self.auto_copy_var,
+            description="关闭编辑器时自动把最终画面写入剪贴板，方便直接粘贴。",
+            bg=CARD_BG,
+            fonts=self.fonts,
+            last=True,
+        ).pack(fill="x")
 
         hotkey_card = Card(self)
         hotkey_card.pack(fill="x", pady=(0, 12))
@@ -628,6 +638,7 @@ class ScreenshotSettingsPanel(tk.Frame):
                 save_dir=self.save_dir_var.get().strip(),
                 image_format=format_value,
                 jpeg_quality=quality,
+                auto_copy=bool(self.auto_copy_var.get()),
                 window_margin_px=margin,
                 hotkey_enabled=bool(self.hotkey_enabled_var.get()),
                 **scroll_values,

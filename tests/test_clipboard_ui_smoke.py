@@ -26,6 +26,15 @@ pytestmark = pytest.mark.skipif(
 )
 
 
+@pytest.fixture(autouse=True)
+def confirm_delete(monkeypatch):
+    """Keep UI tests non-interactive; deletion tests can override this."""
+    monkeypatch.setattr(
+        "quicktools.plugins.clipboard.view.ask_yes_no",
+        lambda *args, **kwargs: True,
+    )
+
+
 class FakeBackend:
     name = "fake"
 
@@ -187,7 +196,7 @@ def test_ui_search_filter_and_delete(setup) -> None:
 
     view._set_filter(None)
     root.update()
-    view._delete_entry(text_entry.id)
+    view._delete_entry(text_entry.id, confirm=False)
     root.update()
     assert service.counts()["text"] == 0
     assert text_entry.id not in view._card_rows
@@ -195,6 +204,16 @@ def test_ui_search_filter_and_delete(setup) -> None:
     view._toggle_sort()
     root.update()
     assert view._sort_button.cget("text") == "↑ 最早"
+
+
+def test_delete_can_be_cancelled(setup, monkeypatch) -> None:
+    _root, _window, view, service, _backend, text_entry, _image_entry, _file_entry = setup
+    monkeypatch.setattr(
+        "quicktools.plugins.clipboard.view.ask_yes_no",
+        lambda *args, **kwargs: False,
+    )
+    view._delete_entry(text_entry.id)
+    assert service.get(text_entry.id) is not None
 
 
 def test_ui_image_preview_falls_back_to_thumbnail(setup) -> None:
@@ -477,7 +496,7 @@ def test_ui_delete_is_incremental(setup, monkeypatch) -> None:
     )
     monkeypatch.setattr(view, "_make_card", counted_make)
 
-    view._delete_entry(image_entry.id)
+    view._delete_entry(image_entry.id, confirm=False)
 
     assert service.get(image_entry.id) is None
     assert refresh_calls == []

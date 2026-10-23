@@ -117,6 +117,21 @@ def test_evaluate_and_add_row(scientific_view) -> None:
     assert calculator._conversion_vars[16].get() == "0x2"
 
 
+def test_clicking_result_copies_it(view) -> None:
+    calculator, root = view
+    window = calculator.winfo_toplevel()
+    window.deiconify()
+    root.update()
+    calculator.current_row.entry.insert(0, "1+1")
+    calculator.evaluate_active()
+    root.update()
+    row = calculator.rows[0]
+    row.result_label.event_generate("<Button-1>", x=2, y=2, when="now")
+    root.update()
+    assert root.clipboard_get() == "2"
+    assert "已复制结果" in calculator.status_var.get()
+
+
 def test_mouse_position_edit_recalculates_result(view) -> None:
     calculator, root = view
     entry = calculator.current_row.entry
