@@ -308,6 +308,17 @@ class AnnotationCanvas(tk.Frame):
             scale = min(scale, 1.0)
         return max(0.02, scale)
 
+    def render_initial_view(self) -> None:
+        """Render the first fit view before the host window is painted."""
+        job = self._initial_view_job
+        self._initial_view_job = None
+        if job is not None:
+            try:
+                self.after_cancel(job)
+            except tk.TclError:
+                pass
+        self._recompute_view()
+
     def _recompute_view(self) -> None:
         self._redraw_job = None
         if self._disposed:

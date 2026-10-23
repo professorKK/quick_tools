@@ -481,30 +481,8 @@ class RecentView(tk.Frame):
             status = getattr(service, "last_status", "")
             self._toast(status or "收藏失败", True)
 
-    def _confirm_delete(self, entry) -> bool:
-        message = (
-            "确定删除这张截图及其文件吗？\n\n"
-            f"{entry.name}\n\n"
-            "此操作不可撤销。"
-        )
-        try:
-            return bool(
-                run_modal_dialog(
-                    self,
-                    lambda parent: messagebox.askyesno(
-                        "删除截图", message, parent=parent
-                    ),
-                )
-            )
-        except Exception:
-            log.exception("删除最近截图的确认框失败：id=%s", entry.id)
-            return False
-
     def _delete(self, entry) -> None:
         log.info("用户操作：删除最近截图 %s", self._describe(entry))
-        if not self._confirm_delete(entry):
-            log.info("用户操作：取消删除最近截图 id=%s", entry.id)
-            return
         service = self.plugin.service
         if service is None:
             log.warning("删除最近截图失败：截图服务未启动")
@@ -518,8 +496,30 @@ class RecentView(tk.Frame):
         status = getattr(service, "last_status", "")
         self._toast(status or "删除截图失败", True)
 
+    def _confirm_clear(self) -> bool:
+        message = (
+            "确定清空最近截图吗？\n\n"
+            "将删除保存目录中的全部管理文件（包括收藏和导入图片）。\n\n"
+            "此操作不可撤销。"
+        )
+        try:
+            return bool(
+                run_modal_dialog(
+                    self,
+                    lambda parent: messagebox.askyesno(
+                        "清空最近截图", message, parent=parent
+                    ),
+                )
+            )
+        except Exception:
+            log.exception("清空最近截图的确认框失败")
+            return False
+
     def _clear(self) -> None:
         log.info("用户操作：最近截图列表点击清空全部")
+        if not self._confirm_clear():
+            log.info("用户操作：取消清空最近截图")
+            return
         service = self.plugin.service
         if service is None:
             log.warning("清空最近截图失败：截图服务未启动")

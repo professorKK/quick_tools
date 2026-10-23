@@ -644,6 +644,10 @@ class Launcher:
         """True when Tk's focus is on ``window`` or one of its dialogs."""
         try:
             focused = window.focus_get()
+        except KeyError:
+            # Tk-created dialogs (message boxes, file pickers) have no Python
+            # widget wrapper, so focus_get() cannot resolve their path.
+            return self._tcl_focus_within(window)
         except tk.TclError:
             return True
         if focused is None:
@@ -666,6 +670,20 @@ class Launcher:
         except (AttributeError, tk.TclError):
             pass
         return False
+
+    def _tcl_focus_within(self, window: tk.Misc) -> bool:
+        """Check focus via Tcl paths for dialogs without Python wrappers."""
+        try:
+            focused = str(window.tk.call("focus"))
+        except tk.TclError:
+            return True
+        if not focused or focused == "none":
+            return False
+        try:
+            top = str(window.tk.call("winfo", "toplevel", focused))
+        except tk.TclError:
+            return True
+        return top == str(window) or top.startswith(f"{window}.")
 
     # -------------------------------------------------------------- plugins
     def reload_plugins(self) -> tuple[int, list[str]]:
@@ -1747,7 +1765,7 @@ class Launcher:
             return
         try:
             focused = popup.focus_get()
-        except tk.TclError:
+        except (tk.TclError, KeyError):
             focused = None
         if focused is None or focused.winfo_toplevel() is not popup:
             self.hide_tray_menu()

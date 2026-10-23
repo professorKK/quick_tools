@@ -273,12 +273,15 @@ def test_recent_row_actions_are_open_copy_edit_favorite_delete(
             monkeypatch.setattr(
                 service, "open_recent", lambda entry: edited.append(entry)
             )
+            def fail_if_called(*args, **kwargs):
+                raise AssertionError("删除最近截图不应弹出确认框")
+
             monkeypatch.setattr(
                 "quicktools.plugins.screenshot.ui.recent_view.messagebox",
                 type(
                     "FakeMessagebox",
                     (),
-                    {"askyesno": staticmethod(lambda *a, **k: True)},
+                    {"askyesno": staticmethod(fail_if_called)},
                 ),
             )
 
@@ -309,7 +312,7 @@ def test_recent_row_actions_are_open_copy_edit_favorite_delete(
         store.close()
 
 
-def test_recent_row_delete_can_be_cancelled(
+def test_recent_row_delete_does_not_ask_for_confirmation(
     tmp_path: Path, monkeypatch
 ) -> None:
     store = RecentStore(tmp_path / "data", tmp_path / "shots")
@@ -328,6 +331,49 @@ def test_recent_row_delete_can_be_cancelled(
             control.pack(fill="both", expand=True)
             root.update()
 
+            def fail_if_called(*args, **kwargs):
+                raise AssertionError("删除最近截图不应弹出确认框")
+
+            monkeypatch.setattr(
+                "quicktools.plugins.screenshot.ui.recent_view.messagebox",
+                type(
+                    "FakeMessagebox",
+                    (),
+                    {"askyesno": staticmethod(fail_if_called)},
+                ),
+            )
+            control.recent_view._delete(entry)
+            root.update()
+
+            assert not entry.path.exists()
+            assert service.entries == []
+            assert _action_links(control.recent_view._scroll.inner) == []
+        finally:
+            window.destroy()
+            root.destroy()
+    finally:
+        store.close()
+
+
+def test_recent_clear_can_be_cancelled(
+    tmp_path: Path, monkeypatch
+) -> None:
+    store = RecentStore(tmp_path / "data", tmp_path / "shots")
+    try:
+        image = Image.new("RGB", (120, 80), (20, 60, 160))
+        output = io.BytesIO()
+        image.save(output, "PNG")
+        store.add_png(output.getvalue(), mode="region", source="test")
+        service = FakeService(store)
+        plugin = FakePlugin(service)
+        root = tk.Tk()
+        root.withdraw()
+        window = tk.Toplevel(root)
+        try:
+            control = ControlWindow(window, plugin)
+            control.pack(fill="both", expand=True)
+            root.update()
+
             monkeypatch.setattr(
                 "quicktools.plugins.screenshot.ui.recent_view.messagebox",
                 type(
@@ -336,12 +382,50 @@ def test_recent_row_delete_can_be_cancelled(
                     {"askyesno": staticmethod(lambda *a, **k: False)},
                 ),
             )
-            control.recent_view._delete(entry)
+            control.recent_view._clear()
             root.update()
 
-            assert entry.path.exists()
             assert service.entries
             assert len(_rows(control)) == 1
+        finally:
+            window.destroy()
+            root.destroy()
+    finally:
+        store.close()
+
+
+def test_recent_clear_confirmed_removes_all(
+    tmp_path: Path, monkeypatch
+) -> None:
+    store = RecentStore(tmp_path / "data", tmp_path / "shots")
+    try:
+        image = Image.new("RGB", (120, 80), (20, 60, 160))
+        output = io.BytesIO()
+        image.save(output, "PNG")
+        store.add_png(output.getvalue(), mode="region", source="test")
+        service = FakeService(store)
+        plugin = FakePlugin(service)
+        root = tk.Tk()
+        root.withdraw()
+        window = tk.Toplevel(root)
+        try:
+            control = ControlWindow(window, plugin)
+            control.pack(fill="both", expand=True)
+            root.update()
+
+            monkeypatch.setattr(
+                "quicktools.plugins.screenshot.ui.recent_view.messagebox",
+                type(
+                    "FakeMessagebox",
+                    (),
+                    {"askyesno": staticmethod(lambda *a, **k: True)},
+                ),
+            )
+            control.recent_view._clear()
+            root.update()
+
+            assert service.entries == []
+            assert _action_links(control.recent_view._scroll.inner) == []
         finally:
             window.destroy()
             root.destroy()

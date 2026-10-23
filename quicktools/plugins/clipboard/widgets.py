@@ -482,7 +482,7 @@ class PlaceholderEntry(tk.Frame):
             try:
                 if self.entry.focus_get() is not self.entry:
                     self._placeholder.place(x=10, rely=0.5, anchor="w")
-            except (tk.TclError, AttributeError):
+            except (tk.TclError, AttributeError, KeyError):
                 pass
 
     def get(self) -> str:

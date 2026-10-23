@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import sys
 import tkinter as tk
 from dataclasses import dataclass
 from pathlib import Path
@@ -97,6 +98,10 @@ class CaptureEditor(tk.Toplevel):
         auto_copy_on_close: bool | None = None,
     ) -> None:
         super().__init__(root)
+        # Keep the window unmapped while the UI is built and positioned.
+        # Mapping early lets X11 place the override-redirect window at 0,0
+        # before the geometry request is processed.
+        self.withdraw()
         self.image = image.copy()
         self.settings = settings
         self.auto_copy_on_close = (
@@ -165,7 +170,23 @@ class CaptureEditor(tk.Toplevel):
 
         width = min(1320, max(900, int(self.winfo_screenwidth() * 0.74)))
         height = min(960, max(620, int(self.winfo_screenheight() * 0.82)))
-        center_on_screen(self, width, height)
+        if sys.platform.startswith("linux"):
+            # X11: the first map of an override-redirect window can ignore a
+            # position request that races with it, leaving the editor at 0,0.
+            # Position it while it is still withdrawn, then map it.
+            center_on_screen(self, width, height)
+            self.deiconify()
+        else:
+            self.deiconify()
+            center_on_screen(self, width, height)
+        self.lift()
+        # Lay out the canvas before painting so the first frame already has
+        # the screenshot instead of an empty editor.
+        try:
+            self.update_idletasks()
+        except tk.TclError:
+            pass
+        self._canvas.render_initial_view()
         self._focus_job = self.after(60, self._focus)
         self._focus_canvas_job = self.after(100, self._focus_canvas)
 
@@ -184,7 +205,11 @@ class CaptureEditor(tk.Toplevel):
         self.bind("<Escape>", lambda _event: self._escape())
 
     def _typing(self) -> bool:
-        widget = self.focus_get()
+        try:
+            widget = self.focus_get()
+        except (tk.TclError, KeyError):
+            # Tk-created dialogs have no Python wrapper for focus_get().
+            return False
         return isinstance(
             widget,
             (

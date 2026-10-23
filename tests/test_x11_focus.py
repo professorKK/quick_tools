@@ -73,6 +73,21 @@ def test_force_foreground_moves_real_x11_focus(root, restore_focus) -> None:
     assert x11_focus.is_foreground(first) is False
 
 
+def test_force_foreground_id_moves_real_x11_focus(root, restore_focus) -> None:
+    first = _frameless(root, 100)
+    second = _frameless(root, 400)
+    root.update()
+
+    assert x11_focus.force_foreground_id(first.winfo_id()) is True
+    assert x11_focus.is_foreground_id(first.winfo_id()) is True
+    assert x11_focus.is_foreground_id(second.winfo_id()) is False
+    assert x11_focus.input_focus_id() is not None
+
+    assert x11_focus.force_foreground_id(second.winfo_id()) is True
+    assert x11_focus.is_foreground_id(second.winfo_id()) is True
+    assert x11_focus.is_foreground_id(first.winfo_id()) is False
+
+
 def test_managed_window_is_left_to_tk(root) -> None:
     window = tk.Toplevel(root)
     window.geometry("200x100+100+100")

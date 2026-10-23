@@ -9,7 +9,7 @@ from pathlib import Path
 from tkinter import messagebox
 from typing import Callable
 
-from . import paths
+from . import modal_dialogs, paths
 from .config import AppSettings, HotkeySpec, load_settings, save_settings
 from .data_migration import (
     MigrationResult,
@@ -44,6 +44,8 @@ class QuickToolsApp:
         self.root.withdraw()
         self.root.title("快捷工具")
         self.root.report_callback_exception = self._report_callback_exception
+        # X11: keep the app windows visible and stack Tk dialogs above them.
+        modal_dialogs.install_overlay_dialogs(self.root)
         self._app_icon_image = None
         self._load_window_icon()
 

@@ -46,6 +46,28 @@ def root():
             pass
 
 
+def test_editor_renders_image_before_first_paint(root: tk.Tk) -> None:
+    editor = CaptureEditor(
+        root,
+        Image.new("RGB", (640, 480), "white"),
+        ScreenshotSettings(),
+        on_copy=lambda _image: None,
+        on_save=lambda _image, _path: None,
+        on_close=lambda _done: None,
+    )
+    try:
+        if sys.platform.startswith("linux"):
+            # The window is positioned while withdrawn and the first view is
+            # rendered synchronously, so it does not flash at 0,0 empty.
+            assert editor._canvas._image_item is not None
+            assert editor._canvas._initial_view_job is None
+        root.update()
+        assert editor.winfo_ismapped()
+    finally:
+        editor.close()
+        root.update()
+
+
 def test_overlay_selects_rectangle(root: tk.Tk) -> None:
     image = Image.new("RGB", (400, 300), (12, 34, 56))
     captured = CapturedImage(image=image, origin=Point(0, 0))
@@ -1101,9 +1123,10 @@ def test_editor_navigation_disabled_at_edges(root: tk.Tk) -> None:
         root.update()
 
 
-def test_modal_dialog_hides_and_restores_frameless_windows(root: tk.Tk) -> None:
+def test_modal_dialog_stacks_above_without_hiding_windows(root: tk.Tk) -> None:
     if sys.platform == "win32":
         pytest.skip("X11 dialog stacking workaround")
+    from quicktools import x11_focus
     from quicktools.modal_dialogs import run_modal_dialog
 
     owner = tk.Toplevel(root)
@@ -1121,9 +1144,13 @@ def test_modal_dialog_hides_and_restores_frameless_windows(root: tk.Tk) -> None:
     try:
         assert run_modal_dialog(owner, action) == "ok"
         root.update()
-        assert seen["parent"] is root
-        assert seen["mapped"] is False
-        assert owner.winfo_ismapped()
+        assert seen["mapped"] is True
+        if x11_focus.supported():
+            assert seen["parent"] is owner
+        else:
+            # Wayland/XWayland keeps the old hide-and-restore fallback.
+            assert seen["parent"] is root
+            assert owner.winfo_ismapped()
     finally:
         owner.destroy()
         root.update()

@@ -263,7 +263,10 @@ class PlaceholderEntry(tk.Frame):
             pass
 
     def _update_placeholder(self) -> None:
-        focused = self.entry.focus_get() is self.entry
+        try:
+            focused = self.entry.focus_get() is self.entry
+        except (tk.TclError, KeyError):
+            focused = False
         if not focused and not self.var.get():
             self._placeholder.place(
                 in_=self.entry, x=3, rely=0.5, anchor="w"

@@ -1649,20 +1649,9 @@ class ClipboardView(tk.Frame):
         self._flush_text_edit()
         self._delete_entry(entry_id)
 
-    def _delete_entry(self, entry_id: int, *, confirm: bool = True) -> None:
+    def _delete_entry(self, entry_id: int) -> None:
         if self.service is None:
             return
-        if confirm:
-            entry = self.service.get(entry_id)
-            if entry is None:
-                return
-            if not ask_yes_no(
-                self,
-                "删除记录",
-                "确定删除这条剪贴板记录吗？\n\n此操作无法撤销。",
-            ):
-                log.info("用户操作：取消删除剪贴板记录 id=%s", entry_id)
-                return
         try:
             deleted = self.service.delete_entry(entry_id)
         except Exception as exc:
@@ -1956,7 +1945,7 @@ class ClipboardView(tk.Frame):
     def _typing_focus(self) -> bool:
         try:
             widget = self.focus_get()
-        except (tk.TclError, AttributeError):
+        except (tk.TclError, AttributeError, KeyError):
             return False
         if widget is None:
             return False

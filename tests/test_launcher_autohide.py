@@ -534,6 +534,24 @@ def test_plugin_stays_visible_when_focus_is_internal(
     assert withdrawn == []
 
 
+def test_focus_within_handles_tcl_dialog_focus(tools, monkeypatch) -> None:
+    launcher, root = tools
+    dialog = f"{launcher.window}.__tk__messagebox"
+    launcher.window.tk.call("toplevel", dialog)
+    try:
+        root.update()
+        launcher.window.tk.call("focus", "-force", dialog)
+        root.update()
+
+        def raise_key_error():
+            raise KeyError("__tk__messagebox")
+
+        monkeypatch.setattr(launcher.window, "focus_get", raise_key_error)
+        assert launcher._focus_within(launcher.window) is True
+    finally:
+        launcher.window.tk.call("destroy", dialog)
+
+
 def test_pinned_plugin_skips_focus_loss_auto_hide(tools, monkeypatch) -> None:
     launcher, _root = tools
     window = _plugin_window(launcher)

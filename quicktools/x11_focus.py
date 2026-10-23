@@ -63,23 +63,14 @@ def _is_frameless(window: tk.Misc) -> bool:
         return False
 
 
-def _window_id(window: tk.Misc) -> int | None:
-    """Return the X window that carries input focus for ``window``.
+def _top_level_id(display, inner_id: int) -> int:
+    """Return the root child that wraps ``inner_id``.
 
     Tk wraps a Toplevel in an outer window once it is mapped. Key events and
     focus events for the whole toplevel are delivered to that wrapper, not to
     ``winfo_id()`` (the inner content window). Focusing the inner window works
     for keystrokes but Tk never sees the matching ``<FocusOut>``.
     """
-    try:
-        if not window.winfo_viewable():
-            return None
-        inner_id = int(window.winfo_id())
-    except (AttributeError, tk.TclError, ValueError):
-        return None
-    display = _get_display()
-    if display is None:
-        return inner_id
     try:
         root_id = display.screen().root.id
         current = display.create_resource_object("window", inner_id)
@@ -95,8 +86,21 @@ def _window_id(window: tk.Misc) -> int | None:
             current_id = parent_id
     except Exception:
         log.debug("读取 X11 窗口层级失败", exc_info=True)
-        return inner_id
     return inner_id
+
+
+def _window_id(window: tk.Misc) -> int | None:
+    """Return the X window that carries input focus for ``window``."""
+    try:
+        if not window.winfo_viewable():
+            return None
+        inner_id = int(window.winfo_id())
+    except (AttributeError, tk.TclError, ValueError):
+        return None
+    display = _get_display()
+    if display is None:
+        return inner_id
+    return _top_level_id(display, inner_id)
 
 
 def _same_window(display, focus, window_id: int, depth: int = 8) -> bool:
@@ -170,3 +174,59 @@ def force_foreground(window: tk.Misc) -> bool:
         log.debug("设置 X11 输入焦点失败", exc_info=True)
         return False
     return is_foreground(window)
+
+
+def input_focus_id() -> int | None:
+    """Return the current X11 input focus window id, if it can be read."""
+    if not supported():
+        return None
+    display = _get_display()
+    if display is None:
+        return None
+    try:
+        focus = display.get_input_focus().focus
+        display.sync()
+    except Exception:
+        log.debug("读取 X11 输入焦点失败", exc_info=True)
+        return None
+    focus_id = getattr(focus, "id", focus)
+    return focus_id if isinstance(focus_id, int) else None
+
+
+def is_foreground_id(window_id: int) -> bool:
+    """True when ``window_id`` or one of its descendants owns input focus."""
+    if not supported():
+        return True
+    display = _get_display()
+    if display is None:
+        return True
+    try:
+        focus = display.get_input_focus().focus
+        display.sync()
+    except Exception:
+        log.debug("读取 X11 输入焦点失败", exc_info=True)
+        return True
+    return _same_window(display, focus, _top_level_id(display, window_id))
+
+
+def force_foreground_id(window_id: int) -> bool:
+    """Give the X11 window carrying ``window_id`` real input focus.
+
+    Used for Tk dialogs created in Tcl (``tk_messageBox`` / ``tk_getOpenFile``)
+    which are not registered as Python widgets and therefore cannot be passed
+    to :func:`force_foreground`.
+    """
+    if not supported():
+        return False
+    display = _get_display()
+    if display is None:
+        return False
+    target_id = _top_level_id(display, window_id)
+    try:
+        target = display.create_resource_object("window", target_id)
+        target.set_input_focus(X.RevertToParent, X.CurrentTime)
+        display.sync()
+    except Exception:
+        log.debug("设置 X11 输入焦点失败", exc_info=True)
+        return False
+    return is_foreground_id(window_id)

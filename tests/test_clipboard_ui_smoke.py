@@ -197,7 +197,7 @@ def test_ui_search_filter_and_delete(setup) -> None:
 
     view._set_filter(None)
     root.update()
-    view._delete_entry(text_entry.id, confirm=False)
+    view._delete_entry(text_entry.id)
     root.update()
     assert service.counts()["text"] == 0
     assert text_entry.id not in view._card_rows
@@ -207,14 +207,18 @@ def test_ui_search_filter_and_delete(setup) -> None:
     assert view._sort_button.cget("text") == "↑ 最早"
 
 
-def test_delete_can_be_cancelled(setup, monkeypatch) -> None:
+def test_delete_does_not_ask_for_confirmation(setup, monkeypatch) -> None:
     _root, _window, view, service, _backend, text_entry, _image_entry, _file_entry = setup
+
+    def fail_if_called(*args, **kwargs):
+        raise AssertionError("删除剪贴板记录不应弹出确认框")
+
     monkeypatch.setattr(
         "quicktools.plugins.clipboard.view.ask_yes_no",
-        lambda *args, **kwargs: False,
+        fail_if_called,
     )
     view._delete_entry(text_entry.id)
-    assert service.get(text_entry.id) is not None
+    assert service.get(text_entry.id) is None
 
 
 def test_ui_image_preview_falls_back_to_thumbnail(setup) -> None:
@@ -497,7 +501,7 @@ def test_ui_delete_is_incremental(setup, monkeypatch) -> None:
     )
     monkeypatch.setattr(view, "_make_card", counted_make)
 
-    view._delete_entry(image_entry.id, confirm=False)
+    view._delete_entry(image_entry.id)
 
     assert service.get(image_entry.id) is None
     assert refresh_calls == []
