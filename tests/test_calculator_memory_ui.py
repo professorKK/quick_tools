@@ -129,6 +129,33 @@ def test_restore_forces_decimal_when_scientific_mode_is_off(
         window.destroy()
 
 
+def test_reentering_calculator_activates_new_row(
+    root: tk.Tk, tmp_path: Path
+) -> None:
+    window, view = make_view(root, tmp_path)
+    try:
+        add_record(view, "1+1")
+        assert [row.entry.get() for row in view.rows] == ["1+1", ""]
+
+        # Leave unconfirmed input in the trailing row, then simulate the
+        # launcher showing the same (hidden) window again.
+        view.rows[-1].entry.insert(0, "2+")
+        view.begin_new_entry()
+        root.update_idletasks()
+        assert [row.entry.get() for row in view.rows] == ["1+1", "2+", ""]
+        assert view.active_row is view.rows[-1]
+
+        # Further entries reuse the trailing blank row instead of piling up
+        # empty rows.
+        view.begin_new_entry()
+        root.update_idletasks()
+        assert len(view.rows) == 3
+        assert view.active_row is view.rows[-1]
+        assert view.rows[-1].entry.get() == ""
+    finally:
+        window.destroy()
+
+
 def test_unconfirmed_input_is_flushed(root: tk.Tk, tmp_path: Path) -> None:
     window, view = make_view(root, tmp_path)
     try:

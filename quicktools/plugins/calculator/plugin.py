@@ -41,6 +41,13 @@ class CalculatorPlugin(PluginBase):
         window.resizable(True, True)
         window.after(60, view.focus_active)
 
+    def on_window_shown(self, window: tk.Toplevel) -> None:
+        # The launcher hides plugin windows instead of destroying them, so a
+        # re-entry would otherwise keep the caret and active row from the last
+        # visit. Always offer a fresh input row while keeping the history.
+        if self._view is not None:
+            self._view.begin_new_entry()
+
     def create_settings_ui(self, parent: tk.Misc) -> None:
         from quicktools.plugins.calculator.settings_view import (
             CalculatorSettingsPanel,

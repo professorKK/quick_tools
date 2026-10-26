@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import sys
+import time
 import tkinter as tk
 from pathlib import Path
 
@@ -37,6 +38,11 @@ class BgPlugin(PluginBase):
 
     def stop_service(self):
         self._log("stop")
+
+    def on_window_shown(self, window):
+        path = Path(self.context.data_dir) / "shown.txt"
+        with path.open("a", encoding="utf-8") as handle:
+            handle.write("shown\\n")
 """
 
 
@@ -125,6 +131,15 @@ def test_background_plugin_starts_once_and_stops(
         launcher.open_plugin(meta)
         root.update()
         assert calls.read_text(encoding="utf-8").splitlines() == ["start"]
+        # Both the first presentation and the re-focus of the existing window
+        # run the optional on_window_shown hook.
+        time.sleep(0.05)
+        root.update()
+        shown = data_root / "bg" / "shown.txt"
+        assert shown.read_text(encoding="utf-8").splitlines() == [
+            "shown",
+            "shown",
+        ]
         launcher._close_plugin("bg", launcher._plugin_windows.pop("bg"))
         root.update()
 

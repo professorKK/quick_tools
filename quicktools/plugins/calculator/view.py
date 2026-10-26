@@ -988,6 +988,27 @@ class CalculatorView(tk.Frame):
         except tk.TclError:
             pass
 
+    def begin_new_entry(self, *, focus: bool = True) -> ScratchRow:
+        """Activate a fresh bottom row when the calculator is entered again.
+
+        The history stays visible; only the input target moves to a new last
+        row. Reuse an existing trailing empty row so repeating this on every
+        show does not pile up blank rows.
+        """
+        if self.rows and not self.rows[-1].memory_expression.strip():
+            row = self.rows[-1]
+        else:
+            row = self.add_row(focus=False, schedule_scroll=False)
+        self.activate_row(row)
+        try:
+            row.entry.icursor(tk.END)
+        except tk.TclError:
+            pass
+        if focus:
+            self.after_idle(row.focus)
+        self._schedule_scroll_to_bottom()
+        return row
+
     def evaluate_active(self) -> None:
         self.evaluate_row(self.current_row)
 

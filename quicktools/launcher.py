@@ -987,6 +987,7 @@ class Launcher:
             # Optional escape hatch for plugins that need to change their
             # title dynamically; normal plugins do not touch this.
             window.quicktools_frame = frame
+            window._quicktools_instance = instance
             instance.create_ui(window)
             self._bind_window_state(meta.id, window)
             self._restore_window_state(meta.id, window, frame)
@@ -1033,8 +1034,20 @@ class Launcher:
         restore_window(window)
         window.deiconify()
         window.lift()
+        self._notify_plugin_window_shown(window)
         self._mark_plugin_shown(window)
         self._focus_frameless(window)
+
+    def _notify_plugin_window_shown(self, window: tk.Toplevel) -> None:
+        """Let a plugin reset its view whenever its window is presented."""
+        instance = getattr(window, "_quicktools_instance", None)
+        callback = getattr(instance, "on_window_shown", None)
+        if not callable(callback):
+            return
+        try:
+            callback(window)
+        except Exception:
+            log.exception("插件窗口显示回调失败")
 
     def _focus_frameless(self, window: tk.Misc) -> None:
         """Focus a frameless window, including real X11 input focus."""
@@ -1350,6 +1363,7 @@ class Launcher:
             restore_window(window)
             window.deiconify()
             window.lift()
+            self._notify_plugin_window_shown(window)
             self._mark_plugin_shown(window)
             self._focus_frameless(window)
         except tk.TclError:

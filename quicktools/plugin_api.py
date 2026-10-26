@@ -121,6 +121,16 @@ class PluginBase(ABC):
     def create_ui(self, window: Any) -> None:
         """Populate the Toplevel window owned by the launcher."""
 
+    def on_window_shown(self, window: Any) -> None:
+        """Called each time the host shows this plugin's main window.
+
+        This includes the first open and every later re-show after the
+        window was hidden, minimized or withdrawn. The window keeps its
+        widgets and state across those cycles; override this hook when
+        re-entering should reset the view (for example, focus a fresh
+        input row). Runs on the Tk main thread. The default is a no-op.
+        """
+
     def create_settings_ui(self, parent: Any) -> None:
         """Fill the settings page of the shared plugin settings dialog.
 
