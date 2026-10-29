@@ -179,7 +179,11 @@ def _x11_monitor_rects() -> list[tuple[int, int, int, int]]:
         return []
     try:
         result = subprocess.run(
-            [xrandr, "--listmonitors"],
+            # ``--current`` returns RandR's cached screen configuration.
+            # Without it xrandr polls the hardware, which blocks for ~1.8s
+            # once the display has been idle and delays the launcher before
+            # it is mapped.
+            [xrandr, "--current", "--listmonitors"],
             capture_output=True,
             text=True,
             timeout=2,
@@ -202,6 +206,9 @@ def _x11_monitor_rects() -> list[tuple[int, int, int, int]]:
     return rectangles
 
 
+# The short TTL only avoids spawning xrandr on every show while keeping
+# monitor hotplug changes reasonably fresh; ``--current`` is what keeps the
+# refresh itself fast after the display has been idle.
 _x11_monitor_cache: tuple[float, list[tuple[int, int, int, int]]] = (0.0, [])
 
 

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -36,6 +37,78 @@ def test_center_on_screen_uses_monitor_under_pointer(monkeypatch) -> None:
     window = FakeWindow()
     ui_theme.center_on_screen(window, 800, 600)
     assert window.geometry_value == "800x600+2480+240"
+
+
+_TWO_MONITOR_OUTPUT = (
+    "Monitors: 2\n"
+    " 0: +*eDP-1 2560/344x1600/215+0+0  eDP-1\n"
+    " 1: +HDMI-1 1920/509x1080/286+-1920+0  HDMI-1\n"
+)
+
+
+def test_x11_monitor_rects_uses_current_and_parses(monkeypatch) -> None:
+    calls: list[list[str]] = []
+
+    class Result:
+        returncode = 0
+        stdout = _TWO_MONITOR_OUTPUT
+
+    monkeypatch.setattr(ui_theme.sys, "platform", "linux")
+    monkeypatch.setattr(ui_theme.shutil, "which", lambda _name: "/usr/bin/xrandr")
+    monkeypatch.setattr(
+        ui_theme.subprocess,
+        "run",
+        lambda args, **_kwargs: calls.append(args) or Result(),
+    )
+
+    assert ui_theme._x11_monitor_rects() == [
+        (0, 0, 2560, 1600),
+        (-1920, 0, 1920, 1080),
+    ]
+    assert calls == [["/usr/bin/xrandr", "--current", "--listmonitors"]]
+
+
+def test_x11_monitor_rects_returns_empty_on_failure(monkeypatch) -> None:
+    class Result:
+        returncode = 1
+        stdout = ""
+
+    monkeypatch.setattr(ui_theme.sys, "platform", "linux")
+    monkeypatch.setattr(ui_theme.shutil, "which", lambda _name: "/usr/bin/xrandr")
+    monkeypatch.setattr(
+        ui_theme.subprocess, "run", lambda *_args, **_kwargs: Result()
+    )
+    assert ui_theme._x11_monitor_rects() == []
+
+    def time_out(*_args, **_kwargs):
+        raise subprocess.TimeoutExpired(cmd="xrandr", timeout=2)
+
+    monkeypatch.setattr(ui_theme.subprocess, "run", time_out)
+    assert ui_theme._x11_monitor_rects() == []
+
+    monkeypatch.setattr(ui_theme.shutil, "which", lambda _name: None)
+    assert ui_theme._x11_monitor_rects() == []
+
+
+def test_work_area_for_point_uses_cached_monitors(monkeypatch) -> None:
+    calls: list[list[str]] = []
+
+    class Result:
+        returncode = 0
+        stdout = _TWO_MONITOR_OUTPUT
+
+    monkeypatch.setattr(ui_theme.sys, "platform", "linux")
+    monkeypatch.setattr(ui_theme.shutil, "which", lambda _name: "/usr/bin/xrandr")
+    monkeypatch.setattr(
+        ui_theme.subprocess,
+        "run",
+        lambda args, **_kwargs: calls.append(args) or Result(),
+    )
+    monkeypatch.setattr(ui_theme, "_x11_monitor_cache", (0.0, []))
+
+    assert ui_theme.work_area_for_point((100, 100)) == (0, 0, 2560, 1600)
+    assert ui_theme.work_area_for_point((-1000, 500)) == (-1920, 0, 1920, 1080)
+    assert len(calls) == 1
 
 
 def test_reveal_missing_file_raises(tmp_path: Path) -> None:
