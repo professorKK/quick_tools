@@ -16,6 +16,8 @@
 - Linux 使用 fontconfig 的 `FcConfigAppFontAddFile`；
 - 字体缺失或加载失败时，`quicktools/ui_icons.py` 回退到 Canvas 线稿。
 
+计算器的 PyQt 窗口通过 `QFontDatabase.addApplicationFont()` 加载同一个字体文件，用于标题栏的设置/置顶/隐藏/放大/关闭和行删除图标；`qt_window.py` 的 `_icon_family()` 在字体缺失时使用 Unicode 字符回退。
+
 字体来自 Google Material Icons，使用 Apache 2.0 许可，许可证全文见 `fonts/MaterialIcons-LICENSE.txt`。源文件地址：<https://github.com/google/material-design-icons/blob/master/font/MaterialIcons-Regular.ttf>。字体不需要由 `scripts/prepare_assets.py` 生成。
 
 这些派生图片由 `scripts/prepare_assets.py` 从 `logo.png` 生成。更换标志时替换 `logo.png`，重新运行：

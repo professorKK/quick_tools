@@ -5,6 +5,7 @@ import sys
 import tkinter as tk
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import Mock
 
 import pytest
 
@@ -664,3 +665,14 @@ def test_mark_plugin_shown_cancels_pending_job(tools, monkeypatch) -> None:
     assert recorder.cancelled == ["job-1"]
     assert window._qt_focus_job is None
     assert window._qt_had_focus is True
+
+
+def test_external_qt_ui_skips_tk_auto_hide_binding(tools) -> None:
+    launcher, _root = tools
+    window = SimpleNamespace(_qt_external_ui=True, bind=Mock())
+
+    launcher._bind_plugin_auto_hide(window)
+
+    window.bind.assert_not_called()
+    assert window._qt_had_focus is False
+    assert window._qt_focus_job is None

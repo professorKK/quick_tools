@@ -11,6 +11,7 @@ dependencies = [
   "pynput>=1.7.7,<2",
   "pystray>=0.19.5,<1",
   "Pillow>=9.0,<12",
+  "PyQt6>=6.6,<7",
   "python-xlib>=0.33; sys_platform == 'linux'",
   "jeepney>=0.8,<1; sys_platform == 'linux'",
 ]
@@ -30,7 +31,7 @@ where = ["."]
 include = ["quicktools*"]
 
 [tool.setuptools.package-data]
-quicktools = ["plugins/*/plugin.json", "assets/*", "assets/keypad/*", "assets/fonts/*", "helpers/*"]
+quicktools = ["plugins/*/plugin.json", "assets/*", "assets/keypad/*", "assets/fonts/*", "helpers/*", "vendor/linux-x86_64/*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

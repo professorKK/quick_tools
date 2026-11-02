@@ -1036,7 +1036,11 @@ class Launcher:
         window.lift()
         self._notify_plugin_window_shown(window)
         self._mark_plugin_shown(window)
-        self._focus_frameless(window)
+        if not getattr(window, "_qt_external_ui", False):
+            # The visible Qt window focuses itself; focusing the invisible Tk
+            # proxy would immediately steal that focus and trigger the Qt
+            # window's focus-out auto-hide.
+            self._focus_frameless(window)
 
     def _notify_plugin_window_shown(self, window: tk.Toplevel) -> None:
         """Let a plugin reset its view whenever its window is presented."""
@@ -1068,6 +1072,14 @@ class Launcher:
         Plugin settings/about dialogs and the screenshot editor/overlay are
         created outside this path, so they keep their own lifecycle.
         """
+        if getattr(window, "_qt_external_ui", False):
+            # The visible window lives in a PyQt helper process; the Tk
+            # window is only an invisible lifecycle proxy. The Qt window
+            # implements its own focus-out hiding.
+            window._qt_focus_job = None
+            window._qt_had_focus = False
+            log.info("插件使用外部 Qt 界面，跳过 Tk 失焦自动隐藏")
+            return
         window._qt_focus_job = None
         window._qt_had_focus = False
         window.bind(
@@ -1365,7 +1377,8 @@ class Launcher:
             window.lift()
             self._notify_plugin_window_shown(window)
             self._mark_plugin_shown(window)
-            self._focus_frameless(window)
+            if not getattr(window, "_qt_external_ui", False):
+                self._focus_frameless(window)
         except tk.TclError:
             pass
 

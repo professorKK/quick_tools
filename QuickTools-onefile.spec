@@ -28,6 +28,12 @@ hiddenimports = [
     'quicktools.win32_focus',
     'quicktools.x11_focus',
     'quicktools.icon_font',
+    'quicktools.plugins.calculator.qt_app',
+    'quicktools.plugins.calculator.qt_host',
+    'quicktools.plugins.calculator.qt_window',
+    'PyQt6.QtCore',
+    'PyQt6.QtGui',
+    'PyQt6.QtWidgets',
     'PIL.Image',
     'PIL.ImageTk',
     'PIL.ImageOps',
@@ -91,6 +97,7 @@ datas = (
     collect('quicktools/plugins')
     + collect('quicktools/assets')
     + collect('quicktools/helpers')
+    + collect('quicktools/vendor')
 )
 
 a = Analysis(
