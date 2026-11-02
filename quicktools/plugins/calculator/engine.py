@@ -343,7 +343,7 @@ class _Parser:
         return value if op == "+" else -value
 
     def _power(self) -> int | float:
-        base = self._primary()
+        base = self._postfix_percent()
         op = self._match_op("^", "**")
         if op is None:
             return base
@@ -361,6 +361,28 @@ class _Parser:
         if isinstance(result, complex):
             raise _error("不支持复数结果")
         return self._check_result(result)
+
+    def _postfix_percent(self) -> int | float:
+        """Parse a primary value followed by optional percent signs.
+
+        ``%`` right after a value is a percent sign (``1%`` is ``0.01``)
+        unless another number or ``(`` follows, in which case it stays the
+        binary modulo operator (``7%4`` is ``3``).
+        """
+        value = self._primary()
+        while True:
+            token = self.current
+            if token.kind != "OP" or token.value != "%":
+                return value
+            upcoming = self.tokens[self.index + 1]
+            if upcoming.kind in ("NUM", "LPAREN"):
+                # Binary modulo; ``_term`` consumes it.
+                return value
+            self._advance()
+            try:
+                value = self._check_result(value / 100)
+            except OverflowError:
+                raise _error("结果超出可计算范围") from None
 
     def _primary(self) -> int | float:
         token = self.current
@@ -413,14 +435,14 @@ def evaluate(expression: str, base: int = 10) -> int | float:
 
 
 # A dangling operator is read as its identity operation: adding/subtracting
-# zero and multiplying/dividing/modulo by one keep the typed value.
+# zero and multiplying/dividing by one keep the typed value. A trailing ``%``
+# is a percent sign, not a modulo operator, so it is never completed here.
 _TRAILING_IDENTITIES = {
     "+": "0",
     "-": "0",
     "*": "1",
     "/": "1",
     "//": "1",
-    "%": "1",
 }
 
 
@@ -432,7 +454,7 @@ def _complete_trailing_operator(text: str, base: int) -> str | None:
     which also rejects unbalanced parentheses such as ``1+(1+``.
     """
     stripped = text.rstrip()
-    for op in ("**", "//", "+", "-", "*", "/", "%"):
+    for op in ("**", "//", "+", "-", "*", "/"):
         if not stripped.endswith(op):
             continue
         identity = _TRAILING_IDENTITIES.get(op)
@@ -451,9 +473,10 @@ def evaluate_live(expression: str, base: int = 10) -> int | float:
     """Evaluate an expression as it is being typed.
 
     Unlike :func:`evaluate`, a dangling ``+``/``-`` is treated as
-    ``+0``/``-0`` and a dangling ``*``/``/``/``//``/``%`` as
-    ``*1``/``/1``/``//1``/``%1``. Power operators and unbalanced
-    parentheses stay non-calculable.
+    ``+0``/``-0`` and a dangling ``*``/``/``/``//`` as
+    ``*1``/``/1``/``//1``. A trailing ``%`` is a percent sign, so ``100*1%``
+    evaluates to ``100``. Power operators and unbalanced parentheses stay
+    non-calculable.
     """
     text = normalize_text(expression).strip()
     if not text:

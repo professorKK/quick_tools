@@ -6,6 +6,7 @@ import tkinter as tk
 import pytest
 
 from quicktools.plugins.calculator.view import CalculatorView
+from quicktools.ui_theme import SUCCESS, FlatButton
 
 pytestmark = pytest.mark.skipif(
     not os.environ.get("DISPLAY"), reason="Tkinter UI smoke test needs a display"
@@ -130,6 +131,51 @@ def test_clicking_result_copies_it(view) -> None:
     root.update()
     assert root.clipboard_get() == "2"
     assert "已复制结果" in calculator.status_var.get()
+    assert calculator.status_label.cget("fg") == SUCCESS
+
+
+def test_right_click_result_menu_copies_full_expression(view) -> None:
+    calculator, root = view
+    window = calculator.winfo_toplevel()
+    window.deiconify()
+    root.update()
+    calculator.current_row.entry.insert(0, "1+1")
+    calculator.evaluate_active()
+    root.update()
+    row = calculator.rows[0]
+    row.result_label.event_generate("<Button-3>", x=2, y=2, when="now")
+    root.update()
+    menu = calculator._result_menu
+    assert menu is not None
+    popup = menu.popup
+    assert popup is not None
+    buttons = [
+        child
+        for frame in popup.winfo_children()
+        for child in frame.winfo_children()
+        if isinstance(child, FlatButton)
+    ]
+    assert [button.cget("text") for button in buttons] == ["完整复制"]
+    button = buttons[0]
+    button.event_generate("<ButtonPress-1>", x=2, y=2, when="now")
+    button.event_generate("<ButtonRelease-1>", x=2, y=2, when="now")
+    root.update()
+    assert root.clipboard_get() == "1+1=2"
+    assert "已复制完整算式" in calculator.status_var.get()
+    assert calculator.status_label.cget("fg") == SUCCESS
+    assert menu.popup is None
+
+
+def test_right_click_without_result_opens_no_menu(view) -> None:
+    calculator, root = view
+    window = calculator.winfo_toplevel()
+    window.deiconify()
+    root.update()
+    calculator.current_row.result_label.event_generate(
+        "<Button-3>", x=2, y=2, when="now"
+    )
+    root.update()
+    assert calculator._result_menu is None
 
 
 def test_mouse_position_edit_recalculates_result(view) -> None:

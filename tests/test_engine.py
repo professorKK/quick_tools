@@ -28,6 +28,11 @@ from quicktools.plugins.calculator.engine import (
         ("2^-2", 0.25),
         ("7//2", 3),
         ("7%4", 3),
+        ("10000*1%", 100),
+        ("100*10%", 10),
+        ("50%", 0.5),
+        ("100+50%", 100.5),
+        ("10000*1%+5", 105),
         ("10/4", 2.5),
         (".5+1", 1.5),
         ("  3 + 4  ", 7),
@@ -35,6 +40,15 @@ from quicktools.plugins.calculator.engine import (
 )
 def test_arithmetic(expression: str, expected) -> None:
     assert evaluate(expression) == expected
+
+
+def test_percent_is_postfix_unless_followed_by_operand() -> None:
+    # A trailing ``%`` is a percent sign; before a number or ``(`` it is
+    # still the binary modulo operator.
+    assert evaluate("1%") == 0.01
+    assert evaluate("10000*1%") == 100
+    assert evaluate("7%4") == 3
+    assert evaluate("7%(2+1)") == 1
 
 
 def test_fullwidth_normalization() -> None:
@@ -101,6 +115,7 @@ def test_result_grouping() -> None:
         "1.2.3",
         "2^50001",
         "2^999999999",
+        "(10^5000)%",
         "0x",
         "0b102",
         "FF",
@@ -145,7 +160,8 @@ def test_division_is_true_division() -> None:
         ("1-", 1),
         ("1*", 1),
         ("1/", 1),
-        ("1%", 0),
+        ("1%", 0.01),
+        ("10000*1%", 100),
         ("1+2*", 3),
         ("1+2+", 3),
         ("(1+2)*", 3),

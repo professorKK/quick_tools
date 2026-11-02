@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import sys
 import tkinter as tk
 import tkinter.font as tkfont
 from pathlib import Path
@@ -11,6 +12,8 @@ from typing import Callable
 from quicktools import paths
 from quicktools.ui_theme import (
     ACCENT,
+    ACCENT_SOFT,
+    ACCENT_SOFT_HOVER,
     BG,
     BORDER,
     DANGER,
@@ -18,6 +21,7 @@ from quicktools.ui_theme import (
     PANEL,
     ROW,
     ROW_ACTIVE,
+    SUCCESS,
     TEXT,
     FlatButton,
     Fonts,
@@ -53,9 +57,11 @@ _SAVE_DEBOUNCE_MS = 400
 _KEYPAD_PADY = (2, 12)
 _KEYPAD_ROW_PAD = 14
 _STATUS_HINT = (
-    "自动计算 · Enter 新建下一层 · 点击结果复制 · 支持 0x / 0b / 0o 前缀"
+    "自动计算 · Enter 新建下一层 · 点击结果复制 · 右键完整复制 · 支持 0x / 0b / 0o 前缀"
 )
-_SIMPLE_STATUS_HINT = "自动计算 · Enter 新建下一层 · 点击结果复制"
+_SIMPLE_STATUS_HINT = (
+    "自动计算 · Enter 新建下一层 · 点击结果复制 · 右键完整复制"
+)
 # The selected base tag is emphasized with color, weight and size.
 _INACTIVE_TAG_SIZE = 9
 _ACTIVE_TAG_SIZE = 11
@@ -103,6 +109,166 @@ _WHITE_KEY_STYLE = {
     "highlightbackground": BORDER,
     "highlightcolor": BORDER,
 }
+_MENU_DISMISS_DELAY_MS = 80
+
+
+class ResultMenu:
+    """Flat right-click menu for a calculator result.
+
+    Tk's native ``Menu`` looks out of place next to the app's flat cards, so
+    the popup draws its own 1px border and uses :class:`FlatButton` items.
+    It is deliberately small: the calculator only needs a growing list of
+    copy actions here, not a full menu bar.
+    """
+
+    def __init__(self, owner: tk.Misc, fonts: Fonts) -> None:
+        self._owner = owner.winfo_toplevel()
+        self._fonts = fonts
+        self._popup: tk.Toplevel | None = None
+        self._restore: Callable[[], None] | None = None
+
+    @property
+    def popup(self) -> tk.Toplevel | None:
+        return self._popup
+
+    def show(
+        self,
+        x_root: int,
+        y_root: int,
+        items: list[tuple[str, Callable[[], None]]],
+        restore: Callable[[], None],
+    ) -> None:
+        self.close(restore_focus=False)
+        popup = tk.Toplevel(self._owner)
+        popup.withdraw()
+        popup.overrideredirect(True)
+        popup.attributes("-topmost", True)
+        popup.configure(bg=BORDER)
+        popup.bind("<Escape>", lambda _event: self.close())
+        popup.bind(
+            "<FocusOut>",
+            lambda _event: self._check_focus_later(popup),
+        )
+        popup.bind("<Button-1>", lambda event: self._on_click(popup, event))
+
+        inner = tk.Frame(popup, bg=BG)
+        inner.pack(fill="both", expand=True, padx=1, pady=1)
+        for index, (label, callback) in enumerate(items):
+            if index:
+                tk.Frame(inner, bg=BORDER, height=1).pack(fill="x")
+            button = FlatButton(
+                inner,
+                label,
+                lambda action=callback: self._invoke(action),
+                fonts=self._fonts,
+                font_size=10,
+                padx=16,
+                pady=8,
+                bg=BG,
+                fg=TEXT,
+                hover_bg=ACCENT_SOFT,
+                press_bg=ACCENT_SOFT_HOVER,
+                anchor="w",
+            )
+            button.pack(fill="x")
+
+        self._popup = popup
+        self._restore = restore
+        popup.update_idletasks()
+        width = max(150, popup.winfo_reqwidth())
+        height = popup.winfo_reqheight()
+        screen_w = popup.winfo_screenwidth()
+        screen_h = popup.winfo_screenheight()
+        x = max(0, min(int(x_root), screen_w - width))
+        y = max(0, min(int(y_root), screen_h - height))
+        popup.geometry(f"{width}x{height}+{x}+{y}")
+        popup.deiconify()
+        popup.lift()
+        self._focus_popup(popup)
+        try:
+            popup.grab_set()
+        except tk.TclError:
+            pass
+
+    def _invoke(self, callback: Callable[[], None]) -> None:
+        try:
+            callback()
+        finally:
+            self.close()
+
+    def _focus_popup(self, popup: tk.Toplevel) -> None:
+        try:
+            popup.focus_force()
+        except tk.TclError:
+            return
+        if not sys.platform.startswith("linux"):
+            return
+        try:
+            from quicktools.x11_focus import force_foreground
+
+            force_foreground(popup)
+        except Exception:
+            log.debug("设置结果菜单原生焦点失败", exc_info=True)
+
+    def _check_focus_later(self, popup: tk.Toplevel) -> None:
+        try:
+            popup.after(
+                _MENU_DISMISS_DELAY_MS,
+                lambda: self._close_if_unfocused(popup),
+            )
+        except tk.TclError:
+            pass
+
+    def _close_if_unfocused(self, popup: tk.Toplevel) -> None:
+        if self._popup is not popup:
+            return
+        try:
+            if not popup.winfo_exists():
+                return
+            focused = popup.focus_get()
+        except (tk.TclError, KeyError):
+            focused = None
+        if focused is None or focused.winfo_toplevel() is not popup:
+            # Focus left the app (or moved elsewhere): do not pull it back,
+            # otherwise clicking another application would steal focus again.
+            self.close(restore_focus=False)
+
+    def _on_click(self, popup: tk.Toplevel, event: tk.Event) -> None:
+        if self._popup is not popup:
+            return
+        try:
+            inside = (
+                popup.winfo_rootx()
+                <= event.x_root
+                < popup.winfo_rootx() + popup.winfo_width()
+                and popup.winfo_rooty()
+                <= event.y_root
+                < popup.winfo_rooty() + popup.winfo_height()
+            )
+        except tk.TclError:
+            inside = False
+        if not inside:
+            self.close()
+
+    def close(self, restore_focus: bool = True) -> None:
+        popup = self._popup
+        restore = self._restore
+        self._popup = None
+        self._restore = None
+        if popup is not None:
+            try:
+                popup.grab_release()
+            except tk.TclError:
+                pass
+            try:
+                popup.destroy()
+            except tk.TclError:
+                pass
+        if restore_focus and restore is not None:
+            try:
+                restore()
+            except tk.TclError:
+                pass
 
 
 class ScratchRow(tk.Frame):
@@ -195,6 +361,7 @@ class ScratchRow(tk.Frame):
         self.entry.bind("<KeyPress>", self._on_key)
         self.entry.bind("<Button-1>", lambda _e: self.view.activate_row(self))
         self.result_label.bind("<Button-1>", self._copy_result)
+        self.result_label.bind("<Button-3>", self._show_result_menu)
         self.stripe.bind("<Button-1>", self._focus_end)
         content.bind("<Button-1>", self._focus_end)
         view.bind_wheel(self)
@@ -253,8 +420,57 @@ class ScratchRow(tk.Frame):
         except tk.TclError:
             self.view.set_status("复制结果失败", error=True)
             return "break"
-        self.view.set_status(f"已复制结果：{text}", error=False)
+        self.view.set_status(f"已复制结果：{text}", success=True)
         return "break"
+
+    def full_expression_text(self) -> str:
+        """Return ``expression=result`` as shown for this row."""
+        if self.result_value is None or self.result_base is None:
+            return ""
+        formatted = format_result(
+            self.result_value,
+            self.result_base,
+            self.view.result_group_size,
+        )
+        return f"{self.expression.strip()}={formatted}"
+
+    def _copy_full_expression(self) -> None:
+        text = self.full_expression_text()
+        if not text:
+            return
+        try:
+            self.clipboard_clear()
+            self.clipboard_append(text)
+            self.update()
+        except tk.TclError:
+            self.view.set_status("复制完整算式失败", error=True)
+            return
+        self.view.set_status(f"已复制完整算式：{text}", success=True)
+
+    def _show_result_menu(self, event: tk.Event) -> str:
+        if self.result_value is None or self.result_base is None:
+            return "break"
+        self.view.activate_row(self)
+        self.view.show_result_menu(event.x_root, event.y_root, self)
+        return "break"
+
+    def _restore_result_focus(self) -> None:
+        if not self.winfo_exists():
+            return
+        self.view.activate_row(self)
+        try:
+            self.entry.focus_set()
+            self.entry.icursor(tk.END)
+        except tk.TclError:
+            return
+        if not sys.platform.startswith("linux"):
+            return
+        try:
+            from quicktools.x11_focus import force_foreground
+
+            force_foreground(self.winfo_toplevel())
+        except Exception:
+            log.debug("恢复计算器输入焦点失败", exc_info=True)
 
     def _on_write(self, *_args) -> None:
         if self._suppress:
@@ -378,6 +594,7 @@ class CalculatorView(tk.Frame):
         self._keypad_icons: dict[str, tk.PhotoImage] = {}
         self._keypad_faces: dict[FlatButton, tuple[str, tk.PhotoImage]] = {}
         self._keypad_compact = False
+        self._result_menu: ResultMenu | None = None
         self._load_operator_icons()
 
         metrics_font = tkfont.Font(family=self.fonts.mono, size=14)
@@ -431,6 +648,17 @@ class CalculatorView(tk.Frame):
         self._update_digit_states()
         self._refresh_conversion()
         self.set_status(self._default_hint())
+
+    def show_result_menu(self, x_root: int, y_root: int, row: ScratchRow) -> None:
+        """Open the result action list at the pointer."""
+        if self._result_menu is None:
+            self._result_menu = ResultMenu(self, self.fonts)
+        self._result_menu.show(
+            x_root,
+            y_root,
+            [("完整复制", row._copy_full_expression)],
+            row._restore_result_focus,
+        )
 
     def _load_operator_icons(self) -> None:
         for name in ("plus", "minus", "multiply", "divide", "equals"):
@@ -953,6 +1181,9 @@ class CalculatorView(tk.Frame):
         if event.widget is not self:
             return
         self._destroyed = True
+        if self._result_menu is not None:
+            self._result_menu.close(restore_focus=False)
+            self._result_menu = None
         if self._scroll_job is not None:
             try:
                 self.after_cancel(self._scroll_job)
@@ -1187,9 +1418,20 @@ class CalculatorView(tk.Frame):
                 button.set_enabled(True)
         self.dot_button.set_enabled(self.base == 10)
 
-    def set_status(self, message: str, *, error: bool = False) -> None:
+    def set_status(
+        self,
+        message: str,
+        *,
+        error: bool = False,
+        success: bool = False,
+    ) -> None:
         self.status_var.set(message)
-        self.status_label.configure(fg=DANGER if error else MUTED)
+        if error:
+            self.status_label.configure(fg=DANGER)
+        elif success:
+            self.status_label.configure(fg=SUCCESS)
+        else:
+            self.status_label.configure(fg=MUTED)
 
     # ---------------------------------------------------------- conversion
     def _refresh_conversion(self) -> None:
