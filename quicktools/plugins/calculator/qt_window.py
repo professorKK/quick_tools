@@ -15,6 +15,7 @@ from pathlib import Path
 from PyQt6.QtCore import (
     QEvent,
     QPoint,
+    QRect,
     QRectF,
     QSize,
     Qt,
@@ -51,7 +52,6 @@ from PyQt6.QtWidgets import (
     QMessageBox,
     QPushButton,
     QScrollArea,
-    QSizeGrip,
     QSizePolicy,
     QSpinBox,
     QToolButton,
@@ -384,11 +384,6 @@ QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{
 QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical {{
     background: transparent;
 }}
-QSizeGrip {{
-    background: transparent;
-    width: 14px;
-    height: 14px;
-}}
 """
 
 
@@ -681,9 +676,10 @@ class ExpressionRow(QFrame):
             self._suppress = False
         self.clear_result()
 
-    def focus_entry(self) -> None:
+    def focus_entry(self, *, move_to_end: bool = True) -> None:
         self.entry.setFocus(Qt.FocusReason.OtherFocusReason)
-        self.entry.setCursorPosition(len(self.entry.text()))
+        if move_to_end:
+            self.entry.setCursorPosition(len(self.entry.text()))
 
     def _on_text_changed(self, _text: str) -> None:
         if self._suppress:
@@ -748,22 +744,31 @@ class ExpressionRow(QFrame):
     def full_expression_text(self) -> str:
         if self.result_value is None or self.result_base is None:
             return ""
-        formatted = format_result(
-            self.result_value,
-            self.result_base,
-            self.window.result_group_size,
-        )
+        try:
+            formatted = format_result(
+                self.result_value,
+                self.result_base,
+                self.window.result_group_size,
+            )
+        except Exception:
+            log.exception("计算器结果格式化失败")
+            return ""
         return f"{self.expression.strip()}={formatted}"
 
     def _copy_result(self) -> None:
         if self.result_value is None or self.result_base is None:
             self.focus_entry()
             return
-        text = format_result(
-            self.result_value,
-            self.result_base,
-            self.window.result_group_size,
-        )
+        try:
+            text = format_result(
+                self.result_value,
+                self.result_base,
+                self.window.result_group_size,
+            )
+        except Exception:
+            log.exception("计算器结果格式化失败")
+            self.window.set_status("结果过大，无法复制", error=True)
+            return
         QApplication.clipboard().setText(text)
         self.window.set_status(f"已复制结果：{text}", success=True)
 
@@ -860,6 +865,55 @@ class TitleBar(QWidget):
             self._window.toggle_maximize()
 
 
+class ResizeGrip(QWidget):
+    """Bottom-right grip that drives the manual resize logic.
+
+    ``QSizeGrip`` delegates to the window manager, which does not resize
+    frameless X11 windows reliably. Forward the drag to the window instead so
+    the grip works on every platform.
+    """
+
+    def __init__(self, window: "CalculatorWindow") -> None:
+        super().__init__(window.card)
+        self._window = window
+        self.setFixedSize(16, 16)
+        self.setCursor(Qt.CursorShape.SizeFDiagCursor)
+        self.setToolTip("拖动调整窗口大小")
+        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, False)
+
+    def paintEvent(self, _event) -> None:  # noqa: N802 - Qt API
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.setPen(QColor(SUBTLE))
+        for offset in (4, 8, 12):
+            painter.drawLine(offset, 15, 15, offset)
+        painter.end()
+
+    def mousePressEvent(self, event) -> None:  # noqa: N802 - Qt API
+        if event.button() == Qt.MouseButton.LeftButton:
+            self._window.start_resize(
+                Qt.Edge.RightEdge | Qt.Edge.BottomEdge,
+                event.globalPosition().toPoint(),
+            )
+            event.accept()
+            return
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event) -> None:  # noqa: N802 - Qt API
+        if event.buttons() & Qt.MouseButton.LeftButton:
+            self._window.resize_to(event.globalPosition().toPoint())
+            event.accept()
+            return
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event) -> None:  # noqa: N802 - Qt API
+        if event.button() == Qt.MouseButton.LeftButton:
+            self._window.end_resize()
+            event.accept()
+            return
+        super().mouseReleaseEvent(event)
+
+
 class CalculatorWindow(QWidget):
     """Frameless PyQt calculator with the scratchpad workflow."""
 
@@ -890,6 +944,9 @@ class CalculatorWindow(QWidget):
         self._start_maximized = False
         self._had_focus = False
         self._scroll_pending = False
+        self._resize_edges = Qt.Edge(0)
+        self._resize_origin: QPoint | None = None
+        self._resize_geometry: QRect | None = None
 
         self._save_timer = QTimer(self)
         self._save_timer.setSingleShot(True)
@@ -953,12 +1010,17 @@ class CalculatorWindow(QWidget):
         header.addWidget(self.science_switch)
         layout.addLayout(header)
 
-        layout.addWidget(self._build_paper(), 2)
+        # Growing the window vertically is meant to reveal more scratchpad
+        # history, not to inflate the keypad. Give the paper most of the
+        # extra height; `_update_keypad_height()` lets the keypad grow a
+        # little with the window without stealing rows.
+        layout.addWidget(self._build_paper(), 5)
         self.conversion_panel = self._build_conversion()
         layout.addWidget(self.conversion_panel)
         self.base_row = self._build_base_selector()
         layout.addWidget(self.base_row)
-        layout.addWidget(self._build_keypad(), 3)
+        self._keypad = self._build_keypad()
+        layout.addWidget(self._keypad, 1)
 
         status_row = QHBoxLayout()
         status_row.setContentsMargins(2, 0, 0, 0)
@@ -967,7 +1029,7 @@ class CalculatorWindow(QWidget):
         self.status_label.setObjectName("Status")
         self.status_label.setProperty("tone", "normal")
         status_row.addWidget(self.status_label, 1)
-        self.size_grip = QSizeGrip(self.card)
+        self.size_grip = ResizeGrip(self)
         status_row.addWidget(
             self.size_grip, 0, Qt.AlignmentFlag.AlignRight
             | Qt.AlignmentFlag.AlignBottom
@@ -1400,28 +1462,133 @@ class CalculatorWindow(QWidget):
             self.raise_()
         self.set_status("已置顶" if pinned else "已取消置顶")
 
+    # ------------------------------------------------------------ resizing
+    def _edges_at(self, point: QPoint) -> Qt.Edge:
+        if self.isMaximized():
+            return Qt.Edge(0)
+        margin = 10
+        edges = Qt.Edge(0)
+        if point.x() <= margin:
+            edges |= Qt.Edge.LeftEdge
+        elif point.x() >= self.width() - margin:
+            edges |= Qt.Edge.RightEdge
+        if point.y() <= margin:
+            edges |= Qt.Edge.TopEdge
+        elif point.y() >= self.height() - margin:
+            edges |= Qt.Edge.BottomEdge
+        return edges
+
+    def start_resize(self, edges: Qt.Edge, global_pos: QPoint) -> None:
+        """Begin a manual resize from an edge or the bottom-right grip.
+
+        On Wayland clients cannot move/resize their own top-level windows, so
+        hand the gesture to the compositor there. X11 and Windows use manual
+        geometry updates because the window manager may ignore
+        ``startSystemResize()`` for frameless windows.
+        """
+        if self.isMaximized() or not edges:
+            return
+        if QGuiApplication.platformName().lower().startswith("wayland"):
+            handle = self.windowHandle()
+            if handle is not None and handle.startSystemResize(edges):
+                return
+        self._resize_edges = edges
+        self._resize_origin = QPoint(global_pos)
+        self._resize_geometry = self.geometry()
+        self._apply_resize_cursor(edges)
+
+    def resize_to(self, global_pos: QPoint) -> None:
+        if self._resize_origin is None or self._resize_geometry is None:
+            return
+        delta = global_pos - self._resize_origin
+        start = self._resize_geometry
+        x, y = start.x(), start.y()
+        width, height = start.width(), start.height()
+        minimum = self.minimumSize()
+        min_width = max(1, minimum.width())
+        min_height = max(1, minimum.height())
+        if self._resize_edges & Qt.Edge.LeftEdge:
+            width = width - delta.x()
+            if width < min_width:
+                width = min_width
+                x = start.x() + start.width() - min_width
+            else:
+                x = start.x() + delta.x()
+        elif self._resize_edges & Qt.Edge.RightEdge:
+            width = max(min_width, width + delta.x())
+        if self._resize_edges & Qt.Edge.TopEdge:
+            height = height - delta.y()
+            if height < min_height:
+                height = min_height
+                y = start.y() + start.height() - min_height
+            else:
+                y = start.y() + delta.y()
+        elif self._resize_edges & Qt.Edge.BottomEdge:
+            height = max(min_height, height + delta.y())
+        self.setGeometry(x, y, width, height)
+
+    def end_resize(self) -> None:
+        active = self._resize_origin is not None
+        self._resize_edges = Qt.Edge(0)
+        self._resize_origin = None
+        self._resize_geometry = None
+        if active:
+            self._apply_resize_cursor(Qt.Edge(0))
+
+    def _apply_resize_cursor(self, edges: Qt.Edge) -> None:
+        if not edges:
+            self.setCursor(Qt.CursorShape.ArrowCursor)
+            return
+        left = bool(edges & Qt.Edge.LeftEdge)
+        right = bool(edges & Qt.Edge.RightEdge)
+        top = bool(edges & Qt.Edge.TopEdge)
+        bottom = bool(edges & Qt.Edge.BottomEdge)
+        if (left and top) or (right and bottom):
+            shape = Qt.CursorShape.SizeFDiagCursor
+        elif (right and top) or (left and bottom):
+            shape = Qt.CursorShape.SizeBDiagCursor
+        elif left or right:
+            shape = Qt.CursorShape.SizeHorCursor
+        else:
+            shape = Qt.CursorShape.SizeVerCursor
+        self.setCursor(shape)
+
     # -------------------------------------------------------------- drag
     def mousePressEvent(self, event) -> None:  # noqa: N802 - Qt API
         if event.button() == Qt.MouseButton.LeftButton:
             edges = self._edges_at(event.position().toPoint())
             if edges:
-                handle = self.windowHandle()
-                if handle is not None and handle.startSystemResize(edges):
-                    return
+                self.start_resize(
+                    edges, event.globalPosition().toPoint()
+                )
+                event.accept()
+                return
         super().mousePressEvent(event)
 
-    def _edges_at(self, point: QPoint) -> Qt.Edge:
-        margin = 8
-        edges = Qt.Edge(0)
-        if point.x() <= margin:
-            edges |= Qt.Edge.LeftEdge
-        if point.x() >= self.width() - margin:
-            edges |= Qt.Edge.RightEdge
-        if point.y() <= margin:
-            edges |= Qt.Edge.TopEdge
-        if point.y() >= self.height() - margin:
-            edges |= Qt.Edge.BottomEdge
-        return edges
+    def mouseMoveEvent(self, event) -> None:  # noqa: N802 - Qt API
+        if self._resize_origin is not None:
+            if event.buttons() & Qt.MouseButton.LeftButton:
+                self.resize_to(event.globalPosition().toPoint())
+                event.accept()
+                return
+            self.end_resize()
+        if not self.isMaximized():
+            self._apply_resize_cursor(
+                self._edges_at(event.position().toPoint())
+            )
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event) -> None:  # noqa: N802 - Qt API
+        if self._resize_origin is not None:
+            self.end_resize()
+            event.accept()
+            return
+        super().mouseReleaseEvent(event)
+
+    def leaveEvent(self, event) -> None:  # noqa: N802 - Qt API
+        if self._resize_origin is None:
+            self._apply_resize_cursor(Qt.Edge(0))
+        super().leaveEvent(event)
 
     # -------------------------------------------------------------- rows
     def add_row(self, *, focus: bool = False) -> ExpressionRow:
@@ -1472,6 +1639,9 @@ class CalculatorWindow(QWidget):
         row.entry_base = self.base
         try:
             value = evaluate_live(text, self.base)
+            formatted = format_result(
+                value, self.base, self.result_group_size
+            )
         except ExpressionError as exc:
             row.set_error("错误")
             self.set_status(str(exc), error=True)
@@ -1485,9 +1655,6 @@ class CalculatorWindow(QWidget):
             self._refresh_conversion()
             self._request_scratchpad_save()
             return
-        formatted = format_result(
-            value, self.base, self.result_group_size
-        )
         row.set_result(value, self.base, formatted)
         self.set_status(self._default_hint())
         self.activate_row(row)
@@ -1510,14 +1677,13 @@ class CalculatorWindow(QWidget):
             return
         try:
             value = evaluate_live(text, self.base)
+            formatted = format_result(
+                value, self.base, self.result_group_size
+            )
         except Exception:
             row.clear_result()
             return
-        row.set_result(
-            value,
-            self.base,
-            format_result(value, self.base, self.result_group_size),
-        )
+        row.set_result(value, self.base, formatted)
 
     def insert_text(self, text: str) -> None:
         row = self.active_row
@@ -1525,7 +1691,10 @@ class CalculatorWindow(QWidget):
             row = self.add_row(focus=True)
         row.entry.insert(text)
         self.activate_row(row)
-        row.focus_entry()
+        # Keep the caret where QLineEdit.insert() left it (right after the
+        # inserted text); forcing it to the end would make an insertion in
+        # the middle of an expression jump behind the trailing digits.
+        row.focus_entry(move_to_end=False)
 
     def backspace(self) -> None:
         row = self.active_row
@@ -1536,7 +1705,7 @@ class CalculatorWindow(QWidget):
         else:
             row.entry.backspace()
         self.activate_row(row)
-        row.focus_entry()
+        row.focus_entry(move_to_end=False)
 
     def clear_active(self) -> None:
         row = self.active_row
@@ -1626,11 +1795,15 @@ class CalculatorWindow(QWidget):
                     if candidate.result_value is not None:
                         value = candidate.result_value
                         break
-        converted = (
-            convert_bases(value)
-            if value is not None
-            else {base: None for base in SUPPORTED_BASES}
-        )
+        try:
+            converted = (
+                convert_bases(value)
+                if value is not None
+                else {base: None for base in SUPPORTED_BASES}
+            )
+        except Exception:
+            log.exception("计算器进制转换失败")
+            converted = {base: None for base in SUPPORTED_BASES}
         for base in SUPPORTED_BASES:
             is_active = base == self.base
             cell = self._conversion_cells[base]
@@ -1661,6 +1834,7 @@ class CalculatorWindow(QWidget):
             self.science_switch.setChecked(enabled)
             self.science_switch.blockSignals(False)
         self.setMinimumHeight(640 if enabled else 600)
+        self._update_keypad_height()
         self._update_digit_buttons()
         self._refresh_conversion()
         self.set_status(self._default_hint())
@@ -1801,14 +1975,11 @@ class CalculatorWindow(QWidget):
             return
         try:
             value = evaluate_live(text, base)
+            formatted = format_result(value, base, self.result_group_size)
         except Exception:
             row.clear_result()
             return
-        row.set_result(
-            value,
-            base,
-            format_result(value, base, self.result_group_size),
-        )
+        row.set_result(value, base, formatted)
 
     def _capture_scratchpad_state(self) -> ScratchpadState:
         entries = [
@@ -1889,8 +2060,26 @@ class CalculatorWindow(QWidget):
         except Exception:
             log.debug("保存计算器窗口状态失败", exc_info=True)
 
+    def _update_keypad_height(self) -> None:
+        """Let the keypad grow a little with tall windows.
+
+        The 5:1 layout stretch makes the scratchpad the main beneficiary of
+        extra height. Raising the keypad's minimum slightly keeps the keys
+        from staying pinned at their smallest size on tall windows without
+        taking rows away from the paper.
+        """
+        keypad = getattr(self, "_keypad", None)
+        if keypad is None:
+            return
+        base = keypad.minimumSizeHint().height()
+        if base <= 0:
+            return
+        spare = max(0, self.height() - self.minimumHeight())
+        keypad.setMinimumHeight(base + min(56, spare // 8))
+
     def resizeEvent(self, event) -> None:  # noqa: N802 - Qt API
         super().resizeEvent(event)
+        self._update_keypad_height()
         if not self.isMaximized():
             self._geometry_timer.start()
 

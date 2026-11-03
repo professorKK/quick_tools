@@ -19,7 +19,12 @@ BASE_PREFIX = {16: "0x", 8: "0o", 2: "0b"}
 MAX_EXPRESSION_LENGTH = 4096
 MAX_PAREN_DEPTH = 100
 MAX_EXPONENT = 50_000
-MAX_RESULT_BITS = 100_000
+# CPython refuses ``str(int)`` above 4300 digits
+# (``sys.get_int_max_str_digits()``). Keep results below that limit so that
+# formatting a live result can never raise; a ``ValueError`` escaping a Qt
+# slot makes PyQt abort the whole calculator helper process.
+# A 14,000-bit integer is at most ~4,215 decimal digits.
+MAX_RESULT_BITS = 14_000
 
 _FULLWIDTH_MAP = str.maketrans(
     {

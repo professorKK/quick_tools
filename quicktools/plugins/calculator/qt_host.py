@@ -17,6 +17,7 @@ import platform
 import subprocess
 import sys
 import threading
+from collections import deque
 from pathlib import Path
 from typing import Callable
 
@@ -99,6 +100,11 @@ class ExternalCalculatorWindow:
         self._failed = False
         self._ready = threading.Event()
         self._started = False
+        # Qt fatal errors and Python tracebacks from the helper are only
+        # written to stderr. Keep the tail so an abnormal exit can be logged
+        # with the real reason instead of just ``code=-6``.
+        self._stderr_tail: deque[str] = deque(maxlen=200)
+        self._stderr_thread: threading.Thread | None = None
 
     def start(self) -> bool:
         """Start the helper; return False when the caller should use Tk."""
@@ -121,7 +127,7 @@ class ExternalCalculatorWindow:
                 helper_command(self.data_dir),
                 stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE,
-                stderr=subprocess.DEVNULL,
+                stderr=subprocess.PIPE,
                 text=True,
                 bufsize=1,
                 close_fds=True,
@@ -132,12 +138,18 @@ class ExternalCalculatorWindow:
             self._restore_host()
             return False
         if self.process.poll() is not None:
+            details = self._read_stderr_now(self.process)
             log.error(
-                "PyQt 计算器进程启动后立即退出，回退到 Tk 界面：code=%s",
+                "PyQt 计算器进程启动后立即退出，回退到 Tk 界面：code=%s%s",
                 self.process.returncode,
+                f"\n{details}" if details else "",
             )
             self._restore_host()
             return False
+        self._stderr_thread = threading.Thread(
+            target=self._read_stderr, args=(self.process,), daemon=True
+        )
+        self._stderr_thread.start()
         threading.Thread(
             target=self._read_ready, args=(self.process,), daemon=True
         ).start()
@@ -160,6 +172,41 @@ class ExternalCalculatorWindow:
                     return
         except (OSError, ValueError):
             pass
+
+    def _read_stderr(self, process: subprocess.Popen[str]) -> None:
+        """Drain the helper's stderr so Qt fatal errors are not lost."""
+        try:
+            if process.stderr is None:
+                return
+            for line in process.stderr:
+                text = line.rstrip()
+                if not text:
+                    continue
+                self._stderr_tail.append(text)
+                log.debug("PyQt 计算器 stderr：%s", text)
+        except (OSError, ValueError):
+            pass
+
+    @staticmethod
+    def _read_stderr_now(process: subprocess.Popen[str]) -> str:
+        """Best-effort read for a helper that already exited."""
+        try:
+            if process.stderr is None:
+                return ""
+            return process.stderr.read().strip()
+        except (OSError, ValueError):
+            return ""
+
+    def _log_stderr_tail(self, reason: str) -> None:
+        thread = self._stderr_thread
+        if thread is not None:
+            # The helper already exited, so the reader is about to hit EOF;
+            # wait briefly for the final traceback lines. This runs on the Tk
+            # thread only after an abnormal exit, where a message box follows.
+            thread.join(timeout=0.2)
+        if not self._stderr_tail:
+            return
+        log.error("%s\n%s", reason, "\n".join(self._stderr_tail))
 
     def _check_startup(self) -> None:
         self._startup_job = None
@@ -335,6 +382,7 @@ class ExternalCalculatorWindow:
             return
         if not self._ready.is_set():
             log.error("PyQt 计算器启动失败：code=%s", code)
+            self._log_stderr_tail("PyQt 计算器错误输出")
             self._fallback_to_tk()
             return
         log.info("PyQt 计算器进程已退出：code=%s", code)
@@ -342,6 +390,7 @@ class ExternalCalculatorWindow:
         self._cancel_startup()
         if code not in (0, None):
             log.error("PyQt 计算器异常退出：code=%s", code)
+            self._log_stderr_tail("PyQt 计算器错误输出")
             try:
                 messagebox.showerror(
                     "计算器界面错误",

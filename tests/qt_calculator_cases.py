@@ -243,6 +243,129 @@ def case_scroll_and_selection() -> None:
         window.close()
 
 
+def case_vertical_space_goes_to_paper() -> None:
+    from PyQt6.QtTest import QTest
+
+    window, _data_dir = _new_window()
+    try:
+        window.show_initial()
+        QTest.qWait(60)
+        window.resize(660, 600)
+        QTest.qWait(40)
+        paper_small = window.paper_card.height()
+        keypad_small = window._keypad.height()
+        key_small = window._digit_buttons["1"].height()
+
+        window.resize(660, 1100)
+        QTest.qWait(40)
+        paper_growth = window.paper_card.height() - paper_small
+        keypad_growth = window._keypad.height() - keypad_small
+        key_growth = window._digit_buttons["1"].height() - key_small
+
+        # The extra height mostly becomes scratchpad rows; the keypad may
+        # only grow a little (capped) so it cannot steal history lines.
+        assert paper_growth > 300, paper_growth
+        assert 0 < keypad_growth <= 56, keypad_growth
+        assert paper_growth > 4 * keypad_growth, (paper_growth, keypad_growth)
+        assert key_growth > 0
+    finally:
+        window.close()
+
+
+def case_manual_resize() -> None:
+    from PyQt6.QtCore import QPoint, Qt
+    from PyQt6.QtTest import QTest
+
+    window, _data_dir = _new_window()
+    try:
+        window.show_initial()
+        QTest.qWait(60)
+        window.resize(660, 740)
+        _process()
+        assert window.size_grip.isVisible()
+
+        start = window.geometry()
+        origin = QPoint(400, 400)
+        window.start_resize(
+            Qt.Edge.RightEdge | Qt.Edge.BottomEdge, origin
+        )
+        window.resize_to(origin + QPoint(120, 80))
+        window.end_resize()
+        assert window.width() == start.width() + 120
+        assert window.height() == start.height() + 80
+
+        # Dragging past the minimum clamps instead of inverting the window.
+        window.start_resize(Qt.Edge.LeftEdge | Qt.Edge.TopEdge, origin)
+        window.resize_to(origin + QPoint(5000, 5000))
+        window.end_resize()
+        assert window.width() == window.minimumWidth()
+        assert window.height() == window.minimumHeight()
+
+        # Maximized windows expose no resize edges and hide the grip.
+        window.showMaximized()
+        QTest.qWait(60)
+        assert window.isMaximized()
+        assert window._edges_at(QPoint(0, 0)) == Qt.Edge(0)
+        assert not window.size_grip.isVisible()
+        window.showNormal()
+        QTest.qWait(60)
+        assert window._edges_at(QPoint(0, 0)) == (
+            Qt.Edge.LeftEdge | Qt.Edge.TopEdge
+        )
+        assert window.size_grip.isVisible()
+    finally:
+        window.close()
+
+
+def case_keypad_inserts_at_cursor() -> None:
+    window, _data_dir = _new_window()
+    try:
+        row = window.active_row
+        row.entry.setText("45-7")
+        row.entry.setCursorPosition(1)
+        # Clicking the keypad must insert at the caret and leave it right
+        # after the new character, not jump to the end of the expression.
+        window.insert_text("-")
+        _process()
+        assert row.expression == "4-5-7", row.expression
+        assert row.entry.cursorPosition() == 2, row.entry.cursorPosition()
+
+        window.insert_text("9")
+        _process()
+        assert row.expression == "4-95-7", row.expression
+        assert row.entry.cursorPosition() == 3, row.entry.cursorPosition()
+
+        window.backspace()
+        _process()
+        assert row.expression == "4-5-7", row.expression
+        assert row.entry.cursorPosition() == 2, row.entry.cursorPosition()
+    finally:
+        window.close()
+
+
+def case_oversized_result_does_not_abort() -> None:
+    from PyQt6.QtCore import Qt
+    from PyQt6.QtTest import QTest
+
+    window, _data_dir = _new_window()
+    try:
+        window.show_initial()
+        QTest.qWait(60)
+        row = window.active_row
+        # This used to raise ValueError inside the textChanged slot while
+        # formatting the live result; PyQt converts an unhandled exception in
+        # a slot into qFatal(), which aborts the helper with SIGABRT.
+        row.entry.setText("2**50000")
+        _process()
+        assert row.result_label.text() == ""
+        QTest.keyClick(row.entry, Qt.Key.Key_Return)
+        _process()
+        assert window.status_label.property("tone") == "error"
+        assert "结果过大" in window.status_label.text()
+    finally:
+        window.close()
+
+
 _CASES = {
     "calculate_and_copy": case_calculate_and_copy,
     "restore_scratchpad": case_restore_scratchpad,
@@ -252,6 +375,10 @@ _CASES = {
     "window_lifecycle": case_window_lifecycle,
     "keypad_and_filter": case_keypad_and_filter,
     "scroll_and_selection": case_scroll_and_selection,
+    "keypad_insert_at_cursor": case_keypad_inserts_at_cursor,
+    "manual_resize": case_manual_resize,
+    "vertical_space": case_vertical_space_goes_to_paper,
+    "oversized_result": case_oversized_result_does_not_abort,
 }
 
 

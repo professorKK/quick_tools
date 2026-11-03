@@ -69,6 +69,22 @@ def test_qt_window_scrolls_to_new_row_and_selects_on_click() -> None:
     _run_case("scroll_and_selection")
 
 
+def test_qt_window_keypad_inserts_at_cursor() -> None:
+    _run_case("keypad_insert_at_cursor")
+
+
+def test_qt_window_manual_resize() -> None:
+    _run_case("manual_resize")
+
+
+def test_qt_window_vertical_space_goes_to_paper() -> None:
+    _run_case("vertical_space")
+
+
+def test_qt_window_oversized_result_does_not_abort() -> None:
+    _run_case("oversized_result")
+
+
 def test_qt_helper_starts_and_reports_ready(tmp_path: Path) -> None:
     env = os.environ.copy()
     env["QT_QPA_PLATFORM"] = "offscreen"

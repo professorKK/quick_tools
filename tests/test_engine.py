@@ -146,6 +146,20 @@ def test_deep_parentheses_guard() -> None:
         evaluate(expression)
 
 
+def test_oversized_results_are_rejected_before_formatting() -> None:
+    # CPython refuses str(int) above 4300 digits. An int that passes the
+    # result guard must always be formattable: a ValueError escaping a Qt
+    # slot aborts the PyQt calculator helper with SIGABRT.
+    with pytest.raises(ExpressionError, match="结果过大"):
+        evaluate("2**50000")
+    with pytest.raises(ExpressionError, match="结果过大"):
+        evaluate_live("2**50000")
+
+    value = evaluate("2**13000")
+    assert isinstance(value, int)
+    assert len(format_result(value, 10)) > 3900
+
+
 def test_division_is_true_division() -> None:
     value = evaluate("1/3")
     assert isinstance(value, float)

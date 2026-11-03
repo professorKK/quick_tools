@@ -709,10 +709,7 @@ class Launcher:
             self._cancel_plugin_focus_job(window)
             self._cancel_window_state_job(plugin_id)
             if self._exists(window):
-                try:
-                    window.destroy()
-                except tk.TclError:
-                    pass
+                self._destroy_plugin_window(window)
         self._plugin_windows.clear()
         self._plugin_frames.clear()
         self.stop_background_plugins()
@@ -926,10 +923,7 @@ class Launcher:
         self._cancel_window_state_job(plugin_id)
         self._plugin_frames.pop(plugin_id, None)
         if window is not None and self._exists(window):
-            try:
-                window.destroy()
-            except tk.TclError:
-                pass
+            self._destroy_plugin_window(window)
         _meta, instance = entry
         try:
             instance.stop_service()
@@ -953,6 +947,25 @@ class Launcher:
             return bool(window.winfo_exists())
         except tk.TclError:
             return False
+
+    @staticmethod
+    def _destroy_plugin_window(window: tk.Toplevel) -> None:
+        """Unmap before destroying so teardown never flashes a blank window.
+
+        Tk destroys child widgets one by one; while only some of them are
+        gone, the still-mapped Toplevel repaints as an empty light rectangle
+        (very visible with the clipboard's hundreds of cards). Withdrawing
+        and flushing the display first hides the window before teardown.
+        """
+        try:
+            window.withdraw()
+            window.update_idletasks()
+        except tk.TclError:
+            pass
+        try:
+            window.destroy()
+        except tk.TclError:
+            pass
 
     def open_plugin(self, meta: PluginMeta) -> None:
         if self._plugins_suspended:
@@ -1389,10 +1402,7 @@ class Launcher:
             self._plugin_windows.pop(plugin_id, None)
         self._cancel_window_state_job(plugin_id)
         self._plugin_frames.pop(plugin_id, None)
-        try:
-            window.destroy()
-        except tk.TclError:
-            pass
+        self._destroy_plugin_window(window)
         self._refresh_cards()
 
     def open_user_plugins_dir(self) -> None:

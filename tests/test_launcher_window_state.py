@@ -147,3 +147,20 @@ def test_plugin_window_size_survives_close_and_reopen(
             root.destroy()
         except tk.TclError:
             pass
+
+
+def test_destroy_plugin_window_withdraws_before_destroy() -> None:
+    calls: list[str] = []
+
+    class FakeWindow:
+        def withdraw(self) -> None:
+            calls.append("withdraw")
+
+        def update_idletasks(self) -> None:
+            calls.append("update")
+
+        def destroy(self) -> None:
+            calls.append("destroy")
+
+    Launcher._destroy_plugin_window(FakeWindow())
+    assert calls == ["withdraw", "update", "destroy"]
