@@ -1380,3 +1380,76 @@ def test_editor_sticker_tool_cancel_restores_select(
         editor.mark_exported()
         editor.close()
         root.update()
+
+
+def test_screenshot_settings_autosave_without_save_button(
+    root: tk.Tk,
+) -> None:
+    from dataclasses import replace
+
+    from quicktools.plugins.screenshot.ui.settings_view import (
+        ScreenshotSettingsPanel,
+    )
+
+    class FakePlugin:
+        def __init__(self) -> None:
+            self.settings = ScreenshotSettings()
+
+        def update_settings(self, **changes):
+            self.settings = replace(self.settings, **changes).normalized()
+            return self.settings
+
+        def suspend_hotkey(self) -> None:
+            pass
+
+        def resume_hotkey(self) -> None:
+            pass
+
+    plugin = FakePlugin()
+    saved: list[bool] = []
+    panel = ScreenshotSettingsPanel(
+        root, plugin, lambda: saved.append(True)
+    )
+    panel.pack(fill="both", expand=True)
+    root.update_idletasks()
+    try:
+        texts: list[str] = []
+
+        def collect(widget) -> None:
+            for child in widget.winfo_children():
+                try:
+                    text = child.cget("text")
+                except tk.TclError:
+                    text = ""
+                if text:
+                    texts.append(str(text))
+                collect(child)
+
+        collect(panel)
+        assert "保存设置" not in texts
+        assert panel.status_var.get() == "修改后自动保存"
+
+        panel.auto_copy_var.set(False)
+        panel._save_now_event()
+        assert plugin.settings.auto_copy is False
+        assert saved == [True]
+        assert panel.status_var.get() == "设置已自动保存"
+
+        panel.quality_var.set("not-a-number")
+        panel._save_now_event()
+        assert plugin.settings.jpeg_quality == 92
+        assert "整数" in panel.status_var.get()
+
+        panel.quality_var.set("80")
+        panel._save_now_event()
+        assert plugin.settings.jpeg_quality == 80
+
+        # Pending debounced edits are flushed when the dialog closes.
+        panel.auto_copy_var.set(True)
+        panel.destroy()
+        assert plugin.settings.auto_copy is True
+    finally:
+        try:
+            panel.destroy()
+        except tk.TclError:
+            pass

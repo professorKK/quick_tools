@@ -63,6 +63,7 @@ _SPECIAL_KEYSYMS = {
     "Right": "right",
 }
 _FORMATS = (("PNG", "png"), ("JPEG", "jpeg"), ("WebP", "webp"))
+_AUTOSAVE_DELAY_MS = 500
 
 
 def _key_from_keysym(keysym: str) -> str | None:
@@ -260,8 +261,12 @@ class ScreenshotSettingsPanel(tk.Frame):
         self.fonts = pick_fonts(self.winfo_toplevel())
         self.settings = plugin.settings
         self._recording = False
-        self.status_var = tk.StringVar(value="")
+        self._save_job: str | None = None
+        self._dirty = False
+        self._browsing = False
+        self.status_var = tk.StringVar(value="修改后自动保存")
         self._build()
+        self._bind_auto_save()
         self.bind("<Destroy>", self._on_destroy, add="+")
 
     def _on_destroy(self, event: tk.Event) -> None:
@@ -270,12 +275,23 @@ class ScreenshotSettingsPanel(tk.Frame):
         if self._recording:
             self.plugin.resume_hotkey()
             self._recording = False
+        if self._save_job is not None:
+            try:
+                self.after_cancel(self._save_job)
+            except tk.TclError:
+                pass
+            self._save_job = None
+        if self._dirty:
+            try:
+                self._apply_settings()
+            except tk.TclError:
+                log.debug("关闭截图设置面板时保存设置失败", exc_info=True)
 
     def _build(self) -> None:
         SectionHeader(
             self,
             "截图与保存",
-            "设置截图保存位置、图片格式和快捷键。修改后点击保存生效。",
+            "设置截图保存位置、图片格式和快捷键。修改后自动保存。",
             bg=SURFACE,
             fonts=self.fonts,
             wraplength=560,
@@ -305,7 +321,7 @@ class ScreenshotSettingsPanel(tk.Frame):
             value=str(self.settings.resolved_save_dir())
         )
         control = save_dir_row.control
-        tk.Entry(
+        self.save_dir_entry = tk.Entry(
             control,
             textvariable=self.save_dir_var,
             bg="#ffffff",
@@ -316,7 +332,8 @@ class ScreenshotSettingsPanel(tk.Frame):
             highlightthickness=1,
             width=30,
             font=self.fonts.u(9),
-        ).pack(side="left")
+        )
+        self.save_dir_entry.pack(side="left")
         FlatButton(
             control,
             "浏览",
@@ -360,13 +377,14 @@ class ScreenshotSettingsPanel(tk.Frame):
         )
         quality_row.pack(fill="x")
         self.quality_var = tk.StringVar(value=str(self.settings.jpeg_quality))
-        ttk.Spinbox(
+        self.quality_spin = ttk.Spinbox(
             quality_row.control,
             from_=50,
             to=100,
             textvariable=self.quality_var,
             width=8,
-        ).pack()
+        )
+        self.quality_spin.pack()
 
         self.auto_copy_var = tk.BooleanVar(value=self.settings.auto_copy)
         ToggleRow(
@@ -453,13 +471,14 @@ class ScreenshotSettingsPanel(tk.Frame):
         self.margin_var = tk.StringVar(
             value=str(self.settings.window_margin_px)
         )
-        ttk.Spinbox(
+        self.margin_spin = ttk.Spinbox(
             margin_row.control,
             from_=0,
             to=500,
             textvariable=self.margin_var,
             width=8,
-        ).pack()
+        )
+        self.margin_spin.pack()
 
         scroll_card = Card(self)
         scroll_card.pack(fill="x", pady=(0, 12))
@@ -514,6 +533,7 @@ class ScreenshotSettingsPanel(tk.Frame):
             ),
         )
         self._scroll_vars: dict[str, tk.StringVar] = {}
+        self._scroll_spins: list[ttk.Spinbox] = []
         for index, (label, key, value, low, high) in enumerate(scroll_fields):
             row = SettingsRow(
                 scroll_body,
@@ -526,13 +546,15 @@ class ScreenshotSettingsPanel(tk.Frame):
             row.pack(fill="x")
             var = tk.StringVar(value=str(value))
             self._scroll_vars[key] = var
-            ttk.Spinbox(
+            spin = ttk.Spinbox(
                 row.control,
                 from_=low,
                 to=high,
                 textvariable=var,
                 width=8,
-            ).pack()
+            )
+            spin.pack()
+            self._scroll_spins.append(spin)
 
         tk.Label(
             self,
@@ -551,35 +573,87 @@ class ScreenshotSettingsPanel(tk.Frame):
             self,
             textvariable=self.status_var,
             bg=SURFACE,
-            fg=ACCENT,
+            fg=MUTED,
             anchor="w",
             font=self.fonts.u(9),
         )
         self._status_label.pack(anchor="w", fill="x", pady=(8, 0))
 
-        buttons = tk.Frame(self, bg=SURFACE)
-        buttons.pack(fill="x", pady=(12, 0))
-        FlatButton(
-            buttons,
-            "保存设置",
-            self._save,
-            fonts=self.fonts,
-            accent=True,
-            font_size=10,
-            padx=16,
-            pady=8,
-        ).pack(side="right")
+    def _bind_auto_save(self) -> None:
+        for var in (
+            self.format_var,
+            self.quality_var,
+            self.auto_copy_var,
+            self.hotkey_enabled_var,
+            self.margin_var,
+            *self._scroll_vars.values(),
+        ):
+            var.trace_add("write", self._schedule_save)
+        # The save directory is free text; applying it on every keystroke
+        # would create partial directories. Save on Enter, focus-out (except
+        # while the directory picker is open), and when the panel is closed.
+        self.save_dir_var.trace_add("write", self._mark_dirty)
+        self.save_dir_entry.bind(
+            "<Return>", self._save_now_event, add="+"
+        )
+        self.save_dir_entry.bind(
+            "<FocusOut>", self._save_dir_focus_out, add="+"
+        )
+        for spin in (self.quality_spin, self.margin_spin, *self._scroll_spins):
+            spin.bind("<FocusOut>", self._save_now_event, add="+")
+            spin.bind("<Return>", self._save_now_event, add="+")
+
+    def _mark_dirty(self, *_args: object) -> None:
+        self._dirty = True
+
+    def _schedule_save(self, *_args: object) -> None:
+        self._dirty = True
+        if self._save_job is not None:
+            try:
+                self.after_cancel(self._save_job)
+            except tk.TclError:
+                pass
+        try:
+            self._save_job = self.after(
+                _AUTOSAVE_DELAY_MS, self._run_autosave
+            )
+        except tk.TclError:
+            self._save_job = None
+
+    def _run_autosave(self) -> None:
+        self._save_job = None
+        self._apply_settings()
+
+    def _save_now_event(self, _event: tk.Event | None = None) -> str:
+        if self._save_job is not None:
+            try:
+                self.after_cancel(self._save_job)
+            except tk.TclError:
+                pass
+            self._save_job = None
+        self._apply_settings()
+        return "break"
+
+    def _save_dir_focus_out(self, _event: tk.Event | None = None) -> None:
+        if self._browsing:
+            return
+        self._save_now_event()
 
     def _browse_dir(self) -> None:
-        selected = open_native_file_dialog(
-            self,
-            filedialog.askdirectory,
-            title="选择截图保存目录",
-            initialdir=self.save_dir_var.get() or None,
-        )
+        self._browsing = True
+        try:
+            selected = open_native_file_dialog(
+                self,
+                filedialog.askdirectory,
+                title="选择截图保存目录",
+                initialdir=self.save_dir_var.get() or None,
+            )
+        finally:
+            self._browsing = False
         if selected:
             log.info("用户操作：选择截图保存目录 %s", selected)
             self.save_dir_var.set(selected)
+            self._save_now_event()
 
     def _record_hotkey(self) -> None:
         if self._recording:
@@ -588,8 +662,9 @@ class ScreenshotSettingsPanel(tk.Frame):
         self.plugin.suspend_hotkey()
 
         def apply(spec: HotkeySpec) -> None:
-            self.plugin.update_settings(hotkey=spec)
+            self.settings = self.plugin.update_settings(hotkey=spec)
             self.hotkey_var.set(spec.display())
+            self._status("截图快捷键已自动保存")
 
         def done() -> None:
             self._recording = False
@@ -598,12 +673,15 @@ class ScreenshotSettingsPanel(tk.Frame):
         _HotkeyRecorder(self.winfo_toplevel(), self.fonts, apply, done)
 
     def _status(self, message: str, *, error: bool = False) -> None:
-        self.status_var.set(message)
         try:
+            self.status_var.set(message)
             self._status_label.configure(fg=DANGER if error else ACCENT)
         except tk.TclError:
             pass
-        host = self.winfo_toplevel()
+        try:
+            host = self.winfo_toplevel()
+        except tk.TclError:
+            return
         setter = getattr(host, "set_status", None)
         if callable(setter):
             try:
@@ -611,30 +689,31 @@ class ScreenshotSettingsPanel(tk.Frame):
             except Exception:
                 pass
 
-    def _save(self) -> None:
-        format_value = next(
-            (
-                value
-                for label, value in _FORMATS
-                if label == self.format_var.get()
-            ),
-            "png",
-        )
+    def _apply_settings(self) -> bool:
+        """Apply pending edits; called by debounce and focus/close events."""
+        if not self._dirty:
+            return True
         try:
+            format_value = next(
+                (
+                    value
+                    for label, value in _FORMATS
+                    if label == self.format_var.get()
+                ),
+                "png",
+            )
             quality = int(self.quality_var.get())
             margin = int(self.margin_var.get())
             scroll_values = {
                 key: int(var.get()) for key, var in self._scroll_vars.items()
             }
-        except ValueError:
-            messagebox.showerror(
-                "设置错误",
-                "质量、外扩边距和滚动参数必须是整数。",
-                parent=self.winfo_toplevel(),
+        except (ValueError, tk.TclError):
+            self._status(
+                "质量、外扩边距和滚动参数必须是整数", error=True
             )
-            return
+            return False
         try:
-            self.plugin.update_settings(
+            self.settings = self.plugin.update_settings(
                 save_dir=self.save_dir_var.get().strip(),
                 image_format=format_value,
                 jpeg_quality=quality,
@@ -644,11 +723,10 @@ class ScreenshotSettingsPanel(tk.Frame):
                 **scroll_values,
             )
         except Exception as exc:
-            log.exception("保存截图设置失败")
-            messagebox.showerror(
-                "保存失败", str(exc), parent=self.winfo_toplevel()
-            )
+            log.exception("自动保存截图设置失败")
             self._status(f"保存失败：{exc}", error=True)
-            return
+            return False
+        self._dirty = False
         self.on_saved()
-        self._status("截图设置已保存")
+        self._status("设置已自动保存")
+        return True

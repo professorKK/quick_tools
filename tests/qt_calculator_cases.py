@@ -42,6 +42,29 @@ def _type(window: CalculatorWindow, expression: str) -> None:
     _process()
 
 
+def _fully_visible_rows(window: CalculatorWindow) -> list[int]:
+    """Indexes of rows completely inside the paper viewport."""
+    from PyQt6.QtCore import QPoint, QRect
+
+    viewport = window.paper_scroll.viewport()
+    area = viewport.rect()
+    indexes: list[int] = []
+    for index, row in enumerate(window.rows):
+        top_left = row.mapTo(viewport, QPoint(0, 0))
+        if area.contains(QRect(top_left, row.size())):
+            indexes.append(index)
+    return indexes
+
+
+def _fill_paper(window: CalculatorWindow, count: int) -> None:
+    from PyQt6.QtTest import QTest
+
+    for index in range(count):
+        window.active_row.entry.setText(f"{index}+1")
+        window.evaluate_active()
+    QTest.qWait(350)
+
+
 def case_calculate_and_copy() -> None:
     window, _data_dir = _new_window()
     try:
@@ -343,6 +366,108 @@ def case_keypad_inserts_at_cursor() -> None:
         window.close()
 
 
+def case_resize_pins_paper_to_bottom() -> None:
+    from PyQt6.QtTest import QTest
+
+    window, _data_dir = _new_window()
+    try:
+        window.resize(660, 1100)
+        window.show_initial()
+        QTest.qWait(150)
+        _fill_paper(window, 24)
+        bar = window.paper_scroll.verticalScrollBar()
+        assert bar.value() == bar.maximum(), (bar.value(), bar.maximum())
+        tall = _fully_visible_rows(window)
+        last = len(window.rows) - 1
+        assert tall[-1] == last, tall
+
+        window.resize(660, 600)
+        QTest.qWait(250)
+        assert bar.value() == bar.maximum(), (bar.value(), bar.maximum())
+        small = _fully_visible_rows(window)
+        assert small[-1] == last, small
+        assert len(small) < len(tall), (small, tall)
+        assert small[0] > tall[0], (small, tall)
+
+        window.resize(660, 1100)
+        QTest.qWait(250)
+        assert bar.value() == bar.maximum(), (bar.value(), bar.maximum())
+        grown = _fully_visible_rows(window)
+        assert grown[-1] == last, grown
+        assert len(grown) > len(small), (grown, small)
+        assert grown[0] < small[0], (grown, small)
+    finally:
+        window.close()
+
+
+def case_resize_keeps_scrolled_up_position() -> None:
+    from PyQt6.QtTest import QTest
+
+    window, _data_dir = _new_window()
+    try:
+        window.resize(660, 1100)
+        window.show_initial()
+        QTest.qWait(150)
+        _fill_paper(window, 24)
+        bar = window.paper_scroll.verticalScrollBar()
+        assert bar.maximum() > 0
+        bar.setValue(0)
+        QTest.qWait(50)
+        value_before = bar.value()
+        before = _fully_visible_rows(window)
+        assert before[0] == 0, before
+        assert before[-1] < len(window.rows) - 1, before
+
+        window.resize(660, 900)
+        QTest.qWait(250)
+        assert bar.value() == value_before, (bar.value(), value_before)
+        assert bar.value() < bar.maximum()
+        after = _fully_visible_rows(window)
+        assert after[0] == 0, after
+        assert len(window.rows) - 1 not in after, after
+    finally:
+        window.close()
+
+
+def case_large_result_does_not_cover_expression() -> None:
+    from PyQt6.QtTest import QTest
+
+    window, _data_dir = _new_window()
+    try:
+        window.resize(660, 700)
+        window.show_initial()
+        QTest.qWait(150)
+        row = window.active_row
+        row.entry.setText("2^10000")
+        QTest.qWait(100)
+
+        full_text = row.result_label.full_text()
+        shown_text = row.result_label.text()
+        assert len(full_text) > 3000
+        assert "…" in shown_text, shown_text
+        assert len(shown_text) < len(full_text)
+        assert "点击复制完整结果" in row.result_label.toolTip()
+
+        # The expression keeps usable width; the result never covers it.
+        assert row.entry.geometry().right() < row.result_label.geometry().left()
+        assert row.entry.width() >= 200, row.entry.width()
+        assert row.width() <= window.paper_scroll.viewport().width()
+
+        QApplication.clipboard().setText("")
+        row._copy_result()
+        assert QApplication.clipboard().text() == full_text[2:]
+        assert len(window.status_label.text()) < 120
+
+        # Narrowing the window re-elides instead of squeezing the entry away.
+        window.resize(560, 700)
+        QTest.qWait(100)
+        assert row.entry.geometry().right() < row.result_label.geometry().left()
+        assert row.entry.width() >= 120, row.entry.width()
+        assert "…" in row.result_label.text()
+    finally:
+        window.close()
+
+
 def case_oversized_result_does_not_abort() -> None:
     from PyQt6.QtCore import Qt
     from PyQt6.QtTest import QTest
@@ -378,6 +503,9 @@ _CASES = {
     "keypad_insert_at_cursor": case_keypad_inserts_at_cursor,
     "manual_resize": case_manual_resize,
     "vertical_space": case_vertical_space_goes_to_paper,
+    "resize_pins_paper_bottom": case_resize_pins_paper_to_bottom,
+    "resize_keeps_scroll_position": case_resize_keeps_scrolled_up_position,
+    "large_result_layout": case_large_result_does_not_cover_expression,
     "oversized_result": case_oversized_result_does_not_abort,
 }
 

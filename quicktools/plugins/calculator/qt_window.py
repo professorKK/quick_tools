@@ -517,6 +517,88 @@ class ClickableLabel(QLabel):
         self.context_requested.emit(event.globalPos())
 
 
+class ResultLabel(ClickableLabel):
+    """Result text that never squeezes the expression out of the row.
+
+    A very large result can be thousands of characters long. QLabel's size
+    hint would then claim that width as its minimum, leaving the expression
+    only a few pixels. Bound the hint and elide the displayed text instead;
+    the full value stays available through copy and the tooltip.
+    """
+
+    _MIN_WIDTH = 148
+    _MAX_HINT_WIDTH = 260
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._full_text = ""
+        self.setMinimumWidth(self._MIN_WIDTH)
+        self.setSizePolicy(
+            QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Preferred
+        )
+
+    def sizeHint(self) -> QSize:  # noqa: N802 - Qt API
+        hint = super().sizeHint()
+        width = self.fontMetrics().horizontalAdvance(self._full_text)
+        hint.setWidth(
+            min(max(width, self._MIN_WIDTH), self._MAX_HINT_WIDTH)
+        )
+        return hint
+
+    def minimumSizeHint(self) -> QSize:  # noqa: N802 - Qt API
+        hint = super().minimumSizeHint()
+        hint.setWidth(self._MIN_WIDTH)
+        return hint
+
+    def setText(self, text: str) -> None:  # noqa: N802 - Qt API
+        self._full_text = text
+        self._update_elided_text()
+        self._update_tooltip()
+
+    def full_text(self) -> str:
+        return self._full_text
+
+    def _update_elided_text(self) -> None:
+        width = max(0, self.contentsRect().width())
+        if width <= 0 or not self._full_text:
+            shown = self._full_text
+        else:
+            shown = self.fontMetrics().elidedText(
+                self._full_text,
+                Qt.TextElideMode.ElideMiddle,
+                width,
+            )
+        if self.text() != shown:
+            super().setText(shown)
+
+    def _update_tooltip(self) -> None:
+        text = self._full_text
+        if not text or self.text() == text:
+            self.setToolTip("")
+            return
+        if len(text) <= 64:
+            self.setToolTip(text)
+            return
+        self.setToolTip(
+            f"{text[:40]}…{text[-20:]}\n"
+            f"点击复制完整结果（共 {len(text)} 个字符）"
+        )
+
+    def resizeEvent(self, event) -> None:  # noqa: N802 - Qt API
+        super().resizeEvent(event)
+        self._update_elided_text()
+        self._update_tooltip()
+
+
+def _preview_text(text: str, limit: int = 60) -> str:
+    """Shorten a potentially huge result for the status bar."""
+    if len(text) <= limit:
+        return text
+    head = max(1, limit // 2)
+    tail = max(1, limit - head)
+    return f"{text[:head]}…{text[-tail:]}（共 {len(text)} 个字符）"
+
+
 class CalculatorEntry(QLineEdit):
     submitted = pyqtSignal()
     focus_entered = pyqtSignal()
@@ -615,13 +697,12 @@ class ExpressionRow(QFrame):
         self.entry.setPalette(palette)
         layout.addWidget(self.entry, 1)
 
-        self.result_label = ClickableLabel(self)
+        self.result_label = ResultLabel(self)
         self.result_label.setObjectName("Result")
         self.result_label.setProperty("state", "muted")
         self.result_label.setAlignment(
             Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
         )
-        self.result_label.setMinimumWidth(148)
         self.result_label.setCursor(Qt.CursorShape.PointingHandCursor)
         layout.addWidget(self.result_label)
 
@@ -770,14 +851,18 @@ class ExpressionRow(QFrame):
             self.window.set_status("结果过大，无法复制", error=True)
             return
         QApplication.clipboard().setText(text)
-        self.window.set_status(f"已复制结果：{text}", success=True)
+        self.window.set_status(
+            f"已复制结果：{_preview_text(text)}", success=True
+        )
 
     def _copy_full_expression(self) -> None:
         text = self.full_expression_text()
         if not text:
             return
         QApplication.clipboard().setText(text)
-        self.window.set_status(f"已复制完整算式：{text}", success=True)
+        self.window.set_status(
+            f"已复制完整算式：{_preview_text(text)}", success=True
+        )
 
     def _show_context_menu(self, pos: QPoint) -> None:
         if self.result_value is None or self.result_base is None:
@@ -944,6 +1029,7 @@ class CalculatorWindow(QWidget):
         self._start_maximized = False
         self._had_focus = False
         self._scroll_pending = False
+        self._paper_follow_bottom = True
         self._resize_edges = Qt.Edge(0)
         self._resize_origin: QPoint | None = None
         self._resize_geometry: QRect | None = None
@@ -1156,9 +1242,9 @@ class CalculatorWindow(QWidget):
         self.paper_layout.setSpacing(2)
         self.paper_layout.addStretch(1)
         self.paper_scroll.setWidget(self.paper_inner)
-        self.paper_scroll.verticalScrollBar().rangeChanged.connect(
-            self._on_scroll_range_changed
-        )
+        bar = self.paper_scroll.verticalScrollBar()
+        bar.rangeChanged.connect(self._on_scroll_range_changed)
+        bar.valueChanged.connect(self._on_scroll_value_changed)
         card_layout.addWidget(self.paper_scroll)
         self.paper_card.setMinimumHeight(170)
         return self.paper_card
@@ -2104,22 +2190,37 @@ class CalculatorWindow(QWidget):
         QTimer.singleShot(50, self._apply_scroll_bottom)
         QTimer.singleShot(200, self._finish_scroll_bottom)
 
-    def _apply_scroll_bottom(self) -> None:
-        if not self._scroll_pending:
-            return
+    def _set_scroll_bottom(self) -> None:
+        """Move the viewport to the newest row."""
         try:
             bar = self.paper_scroll.verticalScrollBar()
             bar.setValue(bar.maximum())
+            self._paper_follow_bottom = True
         except RuntimeError:
             self._scroll_pending = False
+
+    def _apply_scroll_bottom(self) -> None:
+        if not self._scroll_pending:
+            return
+        self._set_scroll_bottom()
 
     def _finish_scroll_bottom(self) -> None:
         self._apply_scroll_bottom()
         self._scroll_pending = False
 
-    def _on_scroll_range_changed(self, _minimum: int, _maximum: int) -> None:
-        if self._scroll_pending:
-            self._apply_scroll_bottom()
+    def _on_scroll_value_changed(self, value: int) -> None:
+        try:
+            maximum = self.paper_scroll.verticalScrollBar().maximum()
+        except RuntimeError:
+            return
+        self._paper_follow_bottom = value >= maximum
+
+    def _on_scroll_range_changed(self, _minimum: int, maximum: int) -> None:
+        # Everything is visible, so the newest row is visible too.
+        if maximum == 0:
+            self._paper_follow_bottom = True
+        if self._scroll_pending or self._paper_follow_bottom:
+            self._set_scroll_bottom()
 
 
 class SettingsDialog(QDialog):

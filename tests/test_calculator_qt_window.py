@@ -81,6 +81,18 @@ def test_qt_window_vertical_space_goes_to_paper() -> None:
     _run_case("vertical_space")
 
 
+def test_qt_window_resize_pins_paper_to_bottom() -> None:
+    _run_case("resize_pins_paper_bottom")
+
+
+def test_qt_window_resize_keeps_scrolled_up_position() -> None:
+    _run_case("resize_keeps_scroll_position")
+
+
+def test_qt_window_large_result_keeps_expression_visible() -> None:
+    _run_case("large_result_layout")
+
+
 def test_qt_window_oversized_result_does_not_abort() -> None:
     _run_case("oversized_result")
 
