@@ -271,6 +271,24 @@ def open_dialog(master: tk.Misc, fonts) -> tk.Toplevel:
 
 截图选区覆盖层、滚动截图控制条这类临时覆盖层需要完全无边框、置顶且不接收普通窗口管理，继续使用 `overrideredirect` 自行处理即可；它们不属于插件主窗口框架。
 
+### 需要独立 Qt 窗口的插件
+
+Tk 与 PyQt 的事件循环不能在同一进程里混用。如果插件需要一个与宿主窗口无关的独立窗口（例如常驻桌面的悬浮窗），可以像内置的计算器和 gp 插件那样，把界面放进**独立的 PyQt 进程**：主进程只保留一个不可见的生命周期代理窗口，插件的可见界面全部由 helper 进程绘制。
+
+要点：
+
+- **分派**：在 `quicktools/__main__.py` 里加自己的隐藏参数（例如 `--my-qt-helper --data-dir <dir>`），在创建 Tk 应用之前就 return 出去；模块级的 `from .app import QuickToolsApp` 守卫要把该参数一起排除，否则 helper 进程会拉进 Tk 模块树。冻结版里 helper 分派还必须早于“脱离终端”的逻辑。
+- **打包**：helper 模块是运行时动态导入的，必须写进 `QuickTools.spec` 与 `QuickTools-onefile.spec` 的 `hiddenimports`，否则打包版起不来。
+- **协议**：helper 从 stdin 读命令、向 stdout 回事件。Tk 侧的后台线程**只把事件放进队列**，由 Tk 主线程用 `root.after(...)` 分发到控件上；不要跨线程操作 Tk。
+- **界面归属**：如果插件的界面（含设置对话框）完全在 Qt 侧，就不要在 Tk 侧再实现一份设置页；右键菜单直接打开 Qt 对话框即可，避免“第一次点击打不开”的跨进程焦点问题。
+- **生命周期**：代理窗口销毁时必须终止 helper 子进程，别留下孤儿进程。
+- **平台依赖**：Linux 上 Qt 的 xcb 插件需要 `libxcb-cursor.so.0`，仓库 `quicktools/vendor/linux-x86_64` 带了该库，可参照计算器 `qt_host.helper_environment()` 的 `LD_LIBRARY_PATH` 回退写法。
+- **多屏几何**：把屏幕选择、位置夹取、直径变化和对话框摆放写成不导入 Qt 的纯逻辑模块（例如 `geometry.py`），Qt 层只负责把 `QScreen.availableGeometry()` 转成普通结构；这样可以在没有显示环境时用假屏幕做回归测试。
+- **设置对话框**：先 `adjustSize()` 再读取宽高，按悬浮窗所在屏幕摆放；不要挂到无边框悬浮窗的父级（窗口管理器可能把它摆到屏幕外），改用无父级顶层窗口 + 置顶 + `raise_()`。只在打开时定位一次；用户手动拖动后，设置项变化不要再调用定位逻辑，否则对话框会被弹回原位。自动保存的设置要在关闭、隐藏、退出和 stdin EOF 时冲刷。
+- **退出语义**：常驻悬浮窗通常带 `Qt.Tool` 标志，不参与 Qt 的“最后主窗口”判定。必须 `QApplication.setQuitOnLastWindowClosed(False)`，否则关闭设置对话框会被当成最后一个主窗口关闭，直接结束 helper；helper 只应在明确的 `quit` 命令或 stdin EOF 时退出。
+
+内置插件 `quicktools/plugins/gp/`（桌面圆形悬浮窗）就是这种实现，可以直接参考它的 `host.py` / `qt_helper.py` / `qt_widget.py` / `qt_settings.py` / `geometry.py` / `qt_screens.py`。
+
 ## 4. 插件 API
 
 ```python

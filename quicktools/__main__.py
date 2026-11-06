@@ -13,7 +13,7 @@ from .ipc import send_command
 from .logging_setup import setup_logging
 from .paths import ensure_app_dirs
 
-if "--calculator-qt-helper" not in sys.argv:
+if "--calculator-qt-helper" not in sys.argv and "--gp-qt-helper" not in sys.argv:
     # The Qt helper must not initialize Tk's module tree in its process.
     # Tests and normal CLI runs still get the module-level symbol they patch.
     from .app import QuickToolsApp
@@ -64,7 +64,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--calculator-qt-helper", action="store_true", help=argparse.SUPPRESS
     )
+    parser.add_argument(
+        "--gp-qt-helper", action="store_true", help=argparse.SUPPRESS
+    )
     parser.add_argument("--data-dir", help=argparse.SUPPRESS)
+    parser.add_argument("--plugin-dir", help=argparse.SUPPRESS)
     parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     return parser
 
@@ -154,6 +158,17 @@ def main(argv: list[str] | None = None) -> int:
 
         data_dir = Path(args.data_dir).expanduser() if args.data_dir else None
         return run_helper(data_dir)
+
+    if args.gp_qt_helper:
+        from pathlib import Path
+
+        from .plugins.gp.qt_helper import run_helper
+
+        data_dir = Path(args.data_dir).expanduser() if args.data_dir else None
+        plugin_dir = (
+            Path(args.plugin_dir).expanduser() if args.plugin_dir else None
+        )
+        return run_helper(data_dir, plugin_dir)
 
     start_visible = True
     start_auto_hide = False
