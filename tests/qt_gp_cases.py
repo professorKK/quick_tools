@@ -22,7 +22,7 @@ if sys.platform.startswith("linux") and not os.environ.get("DISPLAY"):
 from PyQt6.QtCore import QEvent, QPoint, QPointF, Qt, QTimer
 from PyQt6.QtGui import QContextMenuEvent, QEnterEvent, QMouseEvent
 from PyQt6.QtTest import QTest
-from PyQt6.QtWidgets import QApplication, QPushButton
+from PyQt6.QtWidgets import QApplication, QPushButton, QWidget
 
 from quicktools.plugins.gp import qt_widget as qt_widget_module
 from quicktools.plugins.gp.geometry import Rect, ScreenArea, screen_for_rect
@@ -55,27 +55,72 @@ class _FakeApp:
         self.quit_called = True
 
 
-def _new_widget(settings: GpSettings | None = None):
+class _FakeInputMode:
+    """Deterministic input mode for tests; never touches X11/Win32."""
+
+    def __init__(
+        self,
+        *,
+        supported: bool = False,
+        shift: bool = False,
+        fail: bool = False,
+    ) -> None:
+        self.supported_value = supported
+        self.shift_value = shift
+        self.fail = fail
+        self.click_through_calls: list[bool] = []
+        self.close_calls = 0
+
+    def supported(self) -> bool:
+        return self.supported_value
+
+    def shift_down(self) -> bool:
+        return self.shift_value
+
+    def set_click_through(self, widget, enabled: bool) -> bool:
+        self.click_through_calls.append(bool(enabled))
+        return not self.fail
+
+    def close(self) -> None:
+        self.close_calls += 1
+
+
+def _new_widget(
+    settings: GpSettings | None = None,
+    input_mode: _FakeInputMode | None = None,
+):
     events: list[str] = []
     saved: list[GpSettings] = []
     opened: list[bool] = []
     quit_calls: list[bool] = []
+    if input_mode is None:
+        # Existing tests assume the widget is always interactive.
+        input_mode = _FakeInputMode(supported=False)
     widget = FloatingWidget(
         settings or GpSettings(),
         on_open_settings=lambda: opened.append(True),
         on_exit=lambda: quit_calls.append(True),
         emit=events.append,
         persist=saved.append,
+        input_mode=input_mode,
     )
     return widget, events, saved, opened, quit_calls
 
 
 def _new_controller(
-    data_dir: Path, settings: GpSettings | None = None
+    data_dir: Path,
+    settings: GpSettings | None = None,
+    input_mode: _FakeInputMode | None = None,
 ):
     app = _FakeApp()
+    if input_mode is None:
+        input_mode = _FakeInputMode(supported=False)
     controller = GpController(
-        app, data_dir, None, settings or GpSettings()
+        app,
+        data_dir,
+        None,
+        settings or GpSettings(),
+        input_mode=input_mode,
     )
     return controller, app
 
@@ -176,12 +221,22 @@ def case_transparent_background() -> None:
 
 
 def case_hover_opacity() -> None:
+    """悬停透明度只在 Shift 按住且鼠标位于窗口上时生效。"""
     widget, _, _, _, _ = _new_widget()
     widget.show()
     _process()
     widget.enterEvent(QEnterEvent(QPointF(1, 1), QPointF(1, 1), QPointF(1, 1)))
+    # 没按 Shift：即使鼠标进入也保持未聚焦透明度。
+    assert abs(widget.windowOpacity() - 0.5) < 0.02
+
+    widget._cursor_inside = lambda: True
+    widget._set_shift_down(True)
     assert abs(widget.windowOpacity() - 1.0) < 0.02
+
     widget.leaveEvent(QEvent(QEvent.Type.Leave))
+    assert abs(widget.windowOpacity() - 0.5) < 0.02
+
+    widget._set_shift_down(False)
     assert abs(widget.windowOpacity() - 0.5) < 0.02
 
 
@@ -354,6 +409,7 @@ class _FakeMenu:
 
     chosen_text = "设置"
     on_exec: Callable[[], None] | None = None
+    exec_calls = 0
 
     def __init__(self, parent=None) -> None:
         self.actions: list[_FakeAction] = []
@@ -364,6 +420,7 @@ class _FakeMenu:
         return action
 
     def exec(self, pos=None) -> _FakeAction | None:
+        _FakeMenu.exec_calls += 1
         if _FakeMenu.on_exec is not None:
             _FakeMenu.on_exec()
         for action in self.actions:
@@ -372,11 +429,14 @@ class _FakeMenu:
         return None
 
 
-def _context_menu_event() -> QContextMenuEvent:
+def _context_menu_event(
+    modifiers: Qt.KeyboardModifier = Qt.KeyboardModifier.ShiftModifier,
+) -> QContextMenuEvent:
     return QContextMenuEvent(
         QContextMenuEvent.Reason.Mouse,
         QPoint(10, 10),
         QPoint(10, 10),
+        modifiers,
     )
 
 
@@ -483,9 +543,8 @@ def case_context_menu_keeps_hover_opacity() -> None:
         widget, _, _, opened, _ = _new_widget()
         widget.show()
         _process()
-        widget.enterEvent(
-            QEnterEvent(QPointF(1, 1), QPointF(1, 1), QPointF(1, 1))
-        )
+        widget._cursor_inside = lambda: True
+        widget._set_shift_down(True)
         assert abs(widget.windowOpacity() - 1.0) < 0.02
 
         # 真实坐标判定：鼠标在窗口矩形内/外。
@@ -776,6 +835,223 @@ def case_diameter_change_keeps_reachable() -> None:
     assert widget.width() == 250
 
 
+def case_input_click_through_follows_shift() -> None:
+    mode = _FakeInputMode(supported=True)
+    widget, _, _, _, _ = _new_widget(input_mode=mode)
+    widget._cursor_inside = lambda: True
+    widget.show()
+    _process()
+    widget._shift_timer.stop()
+
+    assert widget._input_click_through is True
+    assert abs(widget.windowOpacity() - 0.5) < 0.02
+
+    mode.shift_value = True
+    widget._poll_shift()
+    assert widget._input_click_through is False
+    assert widget._input_interactive is True
+    assert abs(widget.windowOpacity() - 1.0) < 0.02
+
+    mode.shift_value = False
+    widget._poll_shift()
+    assert widget._input_click_through is True
+    assert abs(widget.windowOpacity() - 0.5) < 0.02
+
+
+def case_input_drag_holds_interactive_until_release() -> None:
+    mode = _FakeInputMode(supported=True, shift=True)
+    widget, _, _, _, _ = _new_widget(input_mode=mode)
+    widget._cursor_inside = lambda: True
+    widget.show()
+    QTest.qWait(300)
+    _process()
+    widget._shift_timer.stop()
+    assert widget._input_click_through is False
+
+    start = widget.pos()
+    widget.mousePressEvent(
+        _mouse(
+            QEvent.Type.MouseButtonPress,
+            QPoint(20, 20),
+            start + QPoint(20, 20),
+            _LEFT,
+            _LEFT,
+            _SHIFT,
+        )
+    )
+    assert widget._dragging is True
+
+    # 拖动中松开 Shift：仍必须保持可交互。
+    mode.shift_value = False
+    widget._poll_shift()
+    assert widget._input_click_through is False
+
+    widget.mouseReleaseEvent(
+        _mouse(
+            QEvent.Type.MouseButtonRelease,
+            QPoint(20, 20),
+            start + QPoint(20, 20),
+            _LEFT,
+            _NO_BUTTONS,
+            _NO_MOD,
+        )
+    )
+    assert widget._dragging is False
+    assert widget._input_click_through is True
+
+
+def case_input_menu_holds_interactive_until_closed() -> None:
+    original = qt_widget_module.QMenu
+    qt_widget_module.QMenu = _FakeMenu
+    try:
+        mode = _FakeInputMode(supported=True, shift=True)
+        widget, _, _, _, _ = _new_widget(input_mode=mode)
+        widget._cursor_inside = lambda: True
+        widget.show()
+        QTest.qWait(300)
+        _process()
+        widget._shift_timer.stop()
+        assert widget._input_click_through is False
+
+        during_menu: list[bool] = []
+
+        def hook() -> None:
+            mode.shift_value = False
+            widget._poll_shift()
+            during_menu.append(bool(widget._input_click_through))
+
+        _FakeMenu.on_exec = hook
+        _FakeMenu.chosen_text = "设置"
+        widget.contextMenuEvent(_context_menu_event())
+        assert during_menu == [False], during_menu
+        assert widget._input_click_through is True
+    finally:
+        _FakeMenu.on_exec = None
+        qt_widget_module.QMenu = original
+
+
+def case_input_unsupported_never_click_through() -> None:
+    mode = _FakeInputMode(supported=False)
+    widget, _, _, _, _ = _new_widget(input_mode=mode)
+    widget.show()
+    _process()
+    assert mode.click_through_calls == []
+    assert widget._input_interactive is True
+    assert not widget._shift_timer.isActive()
+
+    widget._set_shift_down(True)
+    assert mode.click_through_calls == []
+    assert widget._input_interactive is True
+
+
+def case_input_failure_degrades_interactive() -> None:
+    mode = _FakeInputMode(supported=True, fail=True)
+    widget, _, _, _, _ = _new_widget(input_mode=mode)
+    widget.show()
+    _process()
+    widget._shift_timer.stop()
+
+    assert widget._input_failed is True
+    assert widget._input_interactive is True
+    assert mode.click_through_calls.count(True) == 1
+
+    # 失败后只尝试恢复输入区域，不再请求穿透。
+    mode.shift_value = True
+    widget._poll_shift()
+    assert mode.click_through_calls.count(True) == 1
+    widget.shutdown()
+
+
+def case_input_timer_lifecycle() -> None:
+    mode = _FakeInputMode(supported=True)
+    widget, _, _, _, _ = _new_widget(input_mode=mode)
+    widget.show_widget()
+    _process()
+    assert widget._shift_timer.isActive()
+
+    widget.hide()
+    _process()
+    assert not widget._shift_timer.isActive()
+
+    widget.shutdown()
+    assert mode.close_calls == 1
+    widget.shutdown()
+    assert mode.close_calls == 1
+
+
+def case_context_menu_requires_shift() -> None:
+    original = qt_widget_module.QMenu
+    qt_widget_module.QMenu = _FakeMenu
+    try:
+        _FakeMenu.exec_calls = 0
+        _FakeMenu.on_exec = None
+        _FakeMenu.chosen_text = "设置"
+        widget, _, _, _, _ = _new_widget()
+        widget.show()
+        _process()
+
+        widget.contextMenuEvent(
+            _context_menu_event(Qt.KeyboardModifier.NoModifier)
+        )
+        assert _FakeMenu.exec_calls == 0
+        assert widget._menu_open is False
+
+        widget.contextMenuEvent(_context_menu_event())
+        assert _FakeMenu.exec_calls == 1
+    finally:
+        _FakeMenu.on_exec = None
+        qt_widget_module.QMenu = original
+
+
+def case_win32_hit_fill() -> None:
+    widget, _, _, _, _ = _new_widget()
+    widget._windows_hit_fill_enabled = lambda: True
+    widget.show()
+    _process()
+    QTest.qWait(100)
+    image = widget.grab().toImage()
+    assert image.pixelColor(1, 1).alpha() == 1
+
+    widget._windows_hit_fill_enabled = lambda: False
+    widget.update()
+    _process()
+    QTest.qWait(50)
+    image = widget.grab().toImage()
+    assert image.pixelColor(1, 1).alpha() == 0
+
+
+def case_input_mode_x11_smoke() -> None:
+    if _app.platformName() != "xcb":
+        print("not xcb: skipped")
+        return
+    if os.environ.get("WAYLAND_DISPLAY") or (
+        os.environ.get("XDG_SESSION_TYPE", "").lower() == "wayland"
+    ):
+        print("wayland session: skipped")
+        return
+    from quicktools.plugins.gp.input_mode import X11InputMode
+
+    window = QWidget()
+    mode = X11InputMode()
+    try:
+        window.resize(80, 80)
+        window.show()
+        _process()
+        QTest.qWait(100)
+        assert mode.supported() is True
+        assert isinstance(mode.shift_down(), bool)
+        assert mode.set_click_through(window, True) is True
+        assert mode.set_click_through(window, False) is True
+    finally:
+        try:
+            mode.set_click_through(window, False)
+        except Exception:
+            pass
+        mode.close()
+        window.close()
+        _process()
+
+
 _CASES = {
     "defaults": case_defaults,
     "transparent_background": case_transparent_background,
@@ -808,6 +1084,25 @@ _CASES = {
     "settings_dialog_auto_saves": case_settings_dialog_auto_saves,
     "settings_dialog_reset_position": case_settings_dialog_reset_position,
     "diameter_change_keeps_reachable": case_diameter_change_keeps_reachable,
+    "input_click_through_follows_shift": (
+        case_input_click_through_follows_shift
+    ),
+    "input_drag_holds_interactive_until_release": (
+        case_input_drag_holds_interactive_until_release
+    ),
+    "input_menu_holds_interactive_until_closed": (
+        case_input_menu_holds_interactive_until_closed
+    ),
+    "input_unsupported_never_click_through": (
+        case_input_unsupported_never_click_through
+    ),
+    "input_failure_degrades_interactive": (
+        case_input_failure_degrades_interactive
+    ),
+    "input_timer_lifecycle": case_input_timer_lifecycle,
+    "context_menu_requires_shift": case_context_menu_requires_shift,
+    "win32_hit_fill": case_win32_hit_fill,
+    "input_mode_x11_smoke": case_input_mode_x11_smoke,
 }
 
 

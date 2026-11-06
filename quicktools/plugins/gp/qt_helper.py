@@ -16,6 +16,7 @@ from PyQt6.QtCore import QObject, QThread, QTimer, pyqtSignal
 from PyQt6.QtWidgets import QApplication
 
 from .geometry import Size, place_dialog, screen_for_rect
+from .input_mode import InputMode
 from .qt_screens import rect_for, screen_areas
 from .qt_settings import SettingsDialog, read_plugin_info
 from .qt_widget import FloatingWidget
@@ -78,6 +79,7 @@ class GpController(QObject):
         data_dir: Path | None,
         plugin_dir: Path | None,
         settings: GpSettings,
+        input_mode: InputMode | None = None,
     ) -> None:
         super().__init__()
         self._app = app
@@ -85,12 +87,14 @@ class GpController(QObject):
         self._info = read_plugin_info(plugin_dir)
         self._dialog: SettingsDialog | None = None
         self._closing = False
+        self._shutdown = False
         self._widget = FloatingWidget(
             settings,
             on_open_settings=self.open_settings,
             on_exit=self.quit,
             emit=emit_line,
             persist=self._persist_widget,
+            input_mode=input_mode,
         )
         # 设置项改动先即时生效，写盘合并到这个防抖定时器。
         self._save_timer = QTimer(self)
@@ -114,7 +118,17 @@ class GpController(QObject):
         self.flush()
         self._hide_dialog()
         self._closing = True
+        self._widget.shutdown()
         self._app.quit()
+
+    def shutdown(self) -> None:
+        """Idempotent shutdown shared by quit and aboutToQuit."""
+        if self._shutdown:
+            return
+        self.flush()
+        self._hide_dialog()
+        self._widget.shutdown()
+        self._shutdown = True
 
     def handle_command(self, command: str) -> None:
         if self._closing:
@@ -236,7 +250,7 @@ def run_helper(
     settings = load_settings(data_dir) if data_dir is not None else GpSettings()
     try:
         controller = GpController(app, data_dir, plugin_dir, settings)
-        app.aboutToQuit.connect(controller.flush)
+        app.aboutToQuit.connect(controller.shutdown)
         reader = CommandReader()
         reader.command.connect(controller.handle_command)
         # 窗口创建后再启动读线程，避免命令丢失。

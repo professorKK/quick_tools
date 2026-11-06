@@ -286,8 +286,9 @@ Tk 与 PyQt 的事件循环不能在同一进程里混用。如果插件需要�
 - **多屏几何**：把屏幕选择、位置夹取、直径变化和对话框摆放写成不导入 Qt 的纯逻辑模块（例如 `geometry.py`），Qt 层只负责把 `QScreen.availableGeometry()` 转成普通结构；这样可以在没有显示环境时用假屏幕做回归测试。
 - **设置对话框**：先 `adjustSize()` 再读取宽高，按悬浮窗所在屏幕摆放；不要挂到无边框悬浮窗的父级（窗口管理器可能把它摆到屏幕外），改用无父级顶层窗口 + 置顶 + `raise_()`。只在打开时定位一次；用户手动拖动后，设置项变化不要再调用定位逻辑，否则对话框会被弹回原位。自动保存的设置要在关闭、隐藏、退出和 stdin EOF 时冲刷。
 - **退出语义**：常驻悬浮窗通常带 `Qt.Tool` 标志，不参与 Qt 的“最后主窗口”判定。必须 `QApplication.setQuitOnLastWindowClosed(False)`，否则关闭设置对话框会被当成最后一个主窗口关闭，直接结束 helper；helper 只应在明确的 `quit` 命令或 stdin EOF 时退出。
+- **点击穿透与全局修饰键**：需要“不按键时穿透、按住修饰键才交互”的常驻窗口时，使用平台原生输入区域（X11 Shape INPUT 区域、Windows `WS_EX_TRANSPARENT`），**不要运行时 `setWindowFlags()`**。Windows 分层窗口的 alpha=0 像素仍会跳过命中测试，必要时铺 alpha=1/255 的整矩形底色；Wayland/XWayland 无法可靠读取全局修饰键时保持“始终可交互”，避免窗口永久穿透。
 
-内置插件 `quicktools/plugins/gp/`（桌面圆形悬浮窗）就是这种实现，可以直接参考它的 `host.py` / `qt_helper.py` / `qt_widget.py` / `qt_settings.py` / `geometry.py` / `qt_screens.py`。
+内置插件 `quicktools/plugins/gp/`（桌面圆形悬浮窗）就是这种实现，可以直接参考它的 `host.py` / `qt_helper.py` / `qt_widget.py` / `qt_settings.py` / `geometry.py` / `qt_screens.py` / `input_mode.py`。
 
 ## 4. 插件 API
 

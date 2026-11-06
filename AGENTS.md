@@ -135,6 +135,11 @@
 - 设置改动**自动保存**（400ms 防抖，关闭/隐藏/退出/EOF 时冲刷），**不要加“保存设置”按钮**；右键“设置”直接在 Qt 进程内打开对话框，**不要绕回 Tk 共享设置页**（第一次点击会打不开）。
 - 圆圈背景色默认关闭（只留描边），可勾选“填充圆圈背景色”打开。
 - 直径滑块范围 10–250，手动输入范围 0–1000；拖滑块同步输入框，手动输入超出滑块范围时滑块停在端点但实际直径仍按手动值生效。手动输入 0 时按 10px 渲染，保留右键入口，避免无法恢复。
+- **Shift 点击穿透**：不按 Shift 时整个方形窗口保持可见但鼠标穿透（左键/右键落到后面的文件或窗口）；按住 Shift 才恢复交互，`Shift+左键`拖动、`Shift+右键`菜单。平台实现集中在 `input_mode.py`：X11 Shape INPUT 区域、Windows `WS_EX_TRANSPARENT`；**禁止运行时 `setWindowFlags()`**（会重建原生窗口）。
+- XWayland/Wayland 按 Wayland 处理：无法可靠获取全局 Shift 或输入区域时保持“始终可交互”，绝不能把窗口永久卡成穿透。X11 恢复输入区域失败时持续重试恢复，不能再请求穿透。
+- Shift 轮询周期 30ms；`show` 启动、`hide` 停止、`shutdown` 关闭。拖动中或菜单打开时即使松开 Shift 也保持可交互；释放左键/关闭菜单后再恢复穿透。悬停透明度只在菜单打开或 Shift 按住且鼠标位于窗口上时生效。
+- `contextMenuEvent` 必须先检查 `event.modifiers() & ShiftModifier`，没有 Shift 直接忽略。Windows 分层窗口需铺 alpha=1/255 的整矩形底色，否则透明角落无法命中；保留 `WS_EX_LAYERED`。
+- gp 测试必须注入 fake `input_mode`，避免真实 X11 输入区域影响测试窗口；新增 `input_mode.py` 时同步两份 spec 的 hiddenimports 和 Linux 的 `Xlib.ext.shape`。
 
 ### 打包依赖
 
@@ -167,9 +172,9 @@
 ## Testing instructions
 
 - 单元测试：pytest（命令见上）。新增行为都要补测试，放在 `tests/` 下同主题文件里。
-- `DISPLAY` 是 Tk 冒烟测试必需的；没有显示环境时相关用例自动 skip（`test_flat_button.py`、`test_clipboard_ui_smoke.py`、`test_plugin_lifecycle.py`、`test_plugin_actions.py`、`test_launcher_window_state.py`、`test_launcher_autohide.py`、`test_x11_focus.py`、`test_ui_icons.py`、`test_win32_focus.py`、`test_window_pin.py`、`test_window_frame.py`、`test_plugin_settings.py`、`test_screenshot_ui_smoke.py`、`test_gp_qt_window.py`）。`test_gp_plugin.py` 的设置/协议/纯几何用例不需要显示环境。
+- `DISPLAY` 是 Tk 冒烟测试必需的；没有显示环境时相关用例自动 skip（`test_flat_button.py`、`test_clipboard_ui_smoke.py`、`test_plugin_lifecycle.py`、`test_plugin_actions.py`、`test_launcher_window_state.py`、`test_launcher_autohide.py`、`test_x11_focus.py`、`test_ui_icons.py`、`test_win32_focus.py`、`test_window_pin.py`、`test_window_frame.py`、`test_plugin_settings.py`、`test_screenshot_ui_smoke.py`、`test_gp_qt_window.py`）。`test_gp_plugin.py` 的设置/协议/纯几何用例和 `test_gp_input_mode.py` 的工厂/Wayland 判定不需要显示环境。
 - `PYTEST_DISABLE_PLUGIN_AUTOLOAD=1` 用于避开系统注入的 pytest 插件；干净环境可省略。
-- **Qt 测试必须在子进程以 `QT_QPA_PLATFORM=offscreen` 运行**，见计算器小节。gp 悬浮窗的 Qt 用例例外：离屏平台不支持窗口透明度，它需要真实显示环境（无 `DISPLAY` 时整组 skip），但仍然只能在子进程里跑；多屏/负坐标/对话框摆放等纯几何逻辑放在 `test_gp_plugin.py`，用假屏幕测试。`closing_settings_does_not_quit` 用例会在真实事件循环里关闭设置对话框，确认 helper 不会提前退出；`settings_dialog_stays_put_when_changed` 用例确认手动拖动对话框后，调整滑块/直径/恢复位置不会把它挪回原位；`context_menu_exit_quits_helper` 与 `test_host_exit_event_destroys_proxy` 确认右键“退出”会结束 helper 并销毁代理窗口。
+- **Qt 测试必须在子进程以 `QT_QPA_PLATFORM=offscreen` 运行**，见计算器小节。gp 悬浮窗的 Qt 用例例外：离屏平台不支持窗口透明度，它需要真实显示环境（无 `DISPLAY` 时整组 skip），但仍然只能在子进程里跑；多屏/负坐标/对话框摆放等纯几何逻辑放在 `test_gp_plugin.py`，用假屏幕测试。`closing_settings_does_not_quit` 用例会在真实事件循环里关闭设置对话框，确认 helper 不会提前退出；`settings_dialog_stays_put_when_changed` 用例确认手动拖动对话框后，调整滑块/直径/恢复位置不会把它挪回原位；`context_menu_exit_quits_helper` 与 `test_host_exit_event_destroys_proxy` 确认右键“退出”会结束 helper 并销毁代理窗口。`input_*` 用例验证 Shift 穿透、拖动/菜单期间保持可交互、失败降级和定时器生命周期；`context_menu_requires_shift` 验证 Shift 门控；`win32_hit_fill` 验证 Windows 命中填充绘制；所有 gp Qt 用例注入 fake input mode，不触碰真实 X11 输入区域。
 - 跨平台用例按平台 skip：`test_clipboard_windows.py` 只在 Windows 跑；`test_hotkey_win32.py` 只测 Win32 虚拟键映射；Wayland portal 只用 fake 客户端验证。
 - 剪贴板服务测试用 `FakeBackend`/`FakeRoot`，不依赖真实系统剪贴板；截图用 `FakeRoot`/`FakeBackend`/`FakeOverlay`/`FakeEditor` 测状态机。
 - 当前实测通过的是 Linux X11；Windows 与 Wayland 代码路径已适配但需按 `README.md` 的实机验收清单在真实环境确认。

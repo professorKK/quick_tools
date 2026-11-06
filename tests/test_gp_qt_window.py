@@ -134,6 +134,42 @@ def test_gp_diameter_change_keeps_reachable() -> None:
     _run_case("diameter_change_keeps_reachable")
 
 
+def test_gp_input_click_through_follows_shift() -> None:
+    _run_case("input_click_through_follows_shift")
+
+
+def test_gp_input_drag_holds_interactive_until_release() -> None:
+    _run_case("input_drag_holds_interactive_until_release")
+
+
+def test_gp_input_menu_holds_interactive_until_closed() -> None:
+    _run_case("input_menu_holds_interactive_until_closed")
+
+
+def test_gp_input_unsupported_never_click_through() -> None:
+    _run_case("input_unsupported_never_click_through")
+
+
+def test_gp_input_failure_degrades_interactive() -> None:
+    _run_case("input_failure_degrades_interactive")
+
+
+def test_gp_input_timer_lifecycle() -> None:
+    _run_case("input_timer_lifecycle")
+
+
+def test_gp_context_menu_requires_shift() -> None:
+    _run_case("context_menu_requires_shift")
+
+
+def test_gp_win32_hit_fill() -> None:
+    _run_case("win32_hit_fill")
+
+
+def test_gp_input_mode_x11_smoke() -> None:
+    _run_case("input_mode_x11_smoke")
+
+
 def test_gp_helper_ready_and_quit(tmp_path: Path) -> None:
     """Helper 必须输出 ready，并在 quit 命令后正常退出。"""
     process = subprocess.Popen(
