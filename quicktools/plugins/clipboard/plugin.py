@@ -16,6 +16,9 @@ log = logging.getLogger(__name__)
 
 class ClipboardPlugin(PluginBase):
     settings_cards = True
+    # Closing this window is routine and does not stop capture; keep the
+    # harmless "hide" button where users instinctively reach for close.
+    titlebar_minimize_outer = True
 
     def __init__(self, context) -> None:
         super().__init__(context)

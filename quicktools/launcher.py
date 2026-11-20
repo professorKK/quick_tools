@@ -996,6 +996,9 @@ class Launcher:
                     self._open_plugin_settings(inst, w)
                 ),
                 on_close=lambda w=window, mid=meta.id: self._close_plugin(mid, w),
+                minimize_outer=getattr(
+                    instance, "titlebar_minimize_outer", False
+                ),
             )
             # Optional escape hatch for plugins that need to change their
             # title dynamically; normal plugins do not touch this.

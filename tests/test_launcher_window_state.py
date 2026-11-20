@@ -30,6 +30,20 @@ class SizedPlugin(PluginBase):
         tk.Frame(window, width=120, height=80).pack()
 """
 
+OUTER_BUTTON_PLUGIN_SOURCE = """
+import tkinter as tk
+
+from quicktools.plugin_api import PluginBase
+
+
+class OuterButtonPlugin(PluginBase):
+    titlebar_minimize_outer = True
+
+    def create_ui(self, window):
+        window.geometry("640x520+200+150")
+        tk.Frame(window, width=120, height=80).pack()
+"""
+
 
 class FakeApp:
     def __init__(self, loader: PluginLoader) -> None:
@@ -48,24 +62,30 @@ class FakeApp:
         pass
 
 
-def write_plugin(root: Path) -> None:
-    folder = root / "sized"
+def write_plugin(
+    root: Path,
+    *,
+    plugin_id: str = "sized",
+    class_name: str = "SizedPlugin",
+    source: str = PLUGIN_SOURCE,
+) -> None:
+    folder = root / plugin_id
     folder.mkdir()
     (folder / "plugin.json").write_text(
         json.dumps(
             {
                 "api_version": 1,
-                "id": "sized",
+                "id": plugin_id,
                 "name": "尺寸测试插件",
                 "description": "window state test",
                 "version": "1.0.0",
                 "entry": "plugin.py",
-                "class": "SizedPlugin",
+                "class": class_name,
             }
         ),
         encoding="utf-8",
     )
-    (folder / "plugin.py").write_text(PLUGIN_SOURCE, encoding="utf-8")
+    (folder / "plugin.py").write_text(source, encoding="utf-8")
 
 
 def open_and_show(launcher: Launcher, meta):
@@ -134,6 +154,48 @@ def test_plugin_window_size_survives_close_and_reopen(
 
         maximized = open_and_show(launcher, meta)
         assert maximized.quicktools_frame.maximized is True
+    finally:
+        try:
+            launcher.stop_background_plugins()
+        except Exception:
+            pass
+        try:
+            launcher.window.destroy()
+        except tk.TclError:
+            pass
+        try:
+            root.destroy()
+        except tk.TclError:
+            pass
+
+
+def test_plugin_titlebar_can_swap_close_and_hide(tmp_path: Path) -> None:
+    builtin = tmp_path / "builtin"
+    user = tmp_path / "user"
+    builtin.mkdir()
+    user.mkdir()
+    write_plugin(
+        user,
+        plugin_id="outer",
+        class_name="OuterButtonPlugin",
+        source=OUTER_BUTTON_PLUGIN_SOURCE,
+    )
+
+    loader = PluginLoader(user_plugins=user, builtin_plugins=builtin)
+    root = tk.Tk()
+    root.withdraw()
+    launcher = Launcher(
+        FakeApp(loader),
+        root,
+        window_states=WindowStateStore(tmp_path / "window_state.json"),
+    )
+    try:
+        meta = next(meta for meta in launcher.plugins if meta.id == "outer")
+        window = open_and_show(launcher, meta)
+        frame = window.quicktools_frame
+        assert frame.minimize_button is not None
+        assert frame.close_button is not None
+        assert frame.minimize_button.winfo_x() > frame.close_button.winfo_x()
     finally:
         try:
             launcher.stop_background_plugins()

@@ -62,6 +62,26 @@ def test_title_bar_has_expected_buttons(root: tk.Tk) -> None:
         window.destroy()
 
 
+def test_close_button_is_rightmost_by_default(root: tk.Tk) -> None:
+    window, frame = make_frame(root)
+    try:
+        assert frame.close_button is not None
+        assert frame.minimize_button is not None
+        assert frame.close_button.winfo_x() > frame.minimize_button.winfo_x()
+    finally:
+        window.destroy()
+
+
+def test_minimize_outer_swaps_close_and_hide(root: tk.Tk) -> None:
+    window, frame = make_frame(root, minimize_outer=True)
+    try:
+        assert frame.minimize_button is not None
+        assert frame.close_button is not None
+        assert frame.minimize_button.winfo_x() > frame.close_button.winfo_x()
+    finally:
+        window.destroy()
+
+
 def test_pin_toggles_topmost_and_state(root: tk.Tk) -> None:
     window, frame = make_frame(root)
     try:

@@ -4,7 +4,10 @@ Every plugin window uses the same custom title bar instead of the operating
 system caption:
 
 * left: plugin icon and name;
-* right: settings, pin, minimize, maximize and close.
+* right: settings, pin, minimize, maximize and close. Pass
+  ``minimize_outer=True`` to place minimize at the far right and close
+  just inside it (used by the clipboard window to reduce accidental
+  closes).
 
 ``WindowFrame`` also owns the behaviour the window manager used to provide:
 dragging, double-click maximize, resize grips, taskbar integration and
@@ -686,6 +689,7 @@ class WindowFrame:
         maximize: bool = True,
         resizable: bool = True,
         dialog: bool = False,
+        minimize_outer: bool = False,
     ) -> None:
         self.window = window
         self.fonts = fonts or pick_fonts(window)
@@ -698,6 +702,7 @@ class WindowFrame:
         self._minimize_enabled = minimize
         self._maximize_enabled = maximize
         self._resizable = resizable
+        self._minimize_outer = minimize_outer
         self._maximized = False
         # Tk's -topmost attribute is ignored for overrideredirect windows on
         # X11, so track the user's choice instead of reading it back.
@@ -772,6 +777,16 @@ class WindowFrame:
         self.settings_button: TitleBarButton | None = None
 
         # Packed right-to-left so CAPTION_BUTTONS reads left-to-right.
+        # ``minimize_outer`` swaps the two so the safest action (hide) sits
+        # where users instinctively click first.
+        if (
+            self._minimize_enabled
+            and not self._dialog
+            and self._minimize_outer
+        ):
+            self.minimize_button = self._add_button(
+                "minimize", self.minimize
+            )
         self.close_button = self._add_button(
             "close", self.close, danger=True
         )
@@ -779,7 +794,11 @@ class WindowFrame:
             self.maximize_button = self._add_button(
                 "maximize", self.toggle_maximize
             )
-        if self._minimize_enabled and not self._dialog:
+        if (
+            self._minimize_enabled
+            and not self._dialog
+            and not self._minimize_outer
+        ):
             self.minimize_button = self._add_button(
                 "minimize", self.minimize
             )

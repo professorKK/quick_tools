@@ -113,6 +113,12 @@ class PluginBase(ABC):
     # content in one shared card so third-party pages still look integrated.
     settings_cards = False
 
+    # Set this to True to put the title bar's "hide" button at the far
+    # right and move "close" just inside it. Useful for background plugins
+    # whose window is closed as a matter of routine, so the button under
+    # the cursor's muscle memory is the harmless one.
+    titlebar_minimize_outer = False
+
     def __init__(self, context: PluginContext) -> None:
         self.context = context
         self._settings_dialog: Any = None
