@@ -7,6 +7,7 @@ Tk 测试读不到内置 Material Icons 字体。生产程序里 Tk 与 Qt 本�
 
 from __future__ import annotations
 
+import json
 import os
 import sys
 import tempfile
@@ -26,6 +27,7 @@ from PyQt6.QtWidgets import QApplication, QPushButton, QWidget
 
 from quicktools.plugins.gp import qt_widget as qt_widget_module
 from quicktools.plugins.gp.geometry import Rect, ScreenArea, screen_for_rect
+from quicktools.plugins.gp.metrics import GIB, SystemUsage, UsageStat
 from quicktools.plugins.gp.qt_helper import GpController, configure_application
 from quicktools.plugins.gp.qt_screens import rect_for, screen_areas
 from quicktools.plugins.gp.qt_settings import read_plugin_info
@@ -85,9 +87,41 @@ class _FakeInputMode:
         self.close_calls += 1
 
 
+class _FakeMetricsSource:
+    """Deterministic metric snapshots for tests; never reads the host."""
+
+    def __init__(
+        self,
+        memory_percent: float = 42.0,
+        disk_percent: float = 68.0,
+    ) -> None:
+        self.memory_percent = memory_percent
+        self.disk_percent = disk_percent
+        self.fail = False
+        self.calls = 0
+
+    def sample(self) -> SystemUsage:
+        self.calls += 1
+        if self.fail:
+            raise RuntimeError("fake metrics failure")
+        return SystemUsage(
+            memory=UsageStat(
+                percent=self.memory_percent,
+                used=int(6.7 * GIB),
+                total=16 * GIB,
+            ),
+            disk=UsageStat(
+                percent=self.disk_percent,
+                used=340 * GIB,
+                total=500 * GIB,
+            ),
+        )
+
+
 def _new_widget(
     settings: GpSettings | None = None,
     input_mode: _FakeInputMode | None = None,
+    metrics_source: _FakeMetricsSource | None = None,
 ):
     events: list[str] = []
     saved: list[GpSettings] = []
@@ -96,6 +130,8 @@ def _new_widget(
     if input_mode is None:
         # Existing tests assume the widget is always interactive.
         input_mode = _FakeInputMode(supported=False)
+    if metrics_source is None:
+        metrics_source = _FakeMetricsSource()
     widget = FloatingWidget(
         settings or GpSettings(),
         on_open_settings=lambda: opened.append(True),
@@ -103,7 +139,9 @@ def _new_widget(
         emit=events.append,
         persist=saved.append,
         input_mode=input_mode,
+        metrics_source=metrics_source,
     )
+    widget._test_metrics = metrics_source
     return widget, events, saved, opened, quit_calls
 
 
@@ -111,17 +149,22 @@ def _new_controller(
     data_dir: Path,
     settings: GpSettings | None = None,
     input_mode: _FakeInputMode | None = None,
+    metrics_source: _FakeMetricsSource | None = None,
 ):
     app = _FakeApp()
     if input_mode is None:
         input_mode = _FakeInputMode(supported=False)
+    if metrics_source is None:
+        metrics_source = _FakeMetricsSource()
     controller = GpController(
         app,
         data_dir,
         None,
         settings or GpSettings(),
         input_mode=input_mode,
+        metrics_source=metrics_source,
     )
+    controller._test_metrics = metrics_source
     return controller, app
 
 
@@ -194,8 +237,8 @@ def _drag(
 
 def case_defaults() -> None:
     widget, _, _, _, _ = _new_widget()
-    assert widget.width() == 120
-    assert widget.height() == 120
+    assert widget.width() == 200
+    assert widget.height() == 200
     assert abs(widget.windowOpacity() - 0.5) < 0.02
     flags = widget.windowFlags()
     assert flags & Qt.WindowType.FramelessWindowHint
@@ -203,21 +246,51 @@ def case_defaults() -> None:
     assert flags & Qt.WindowType.Tool
     assert widget.testAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
     assert widget.testAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating)
-    assert widget.settings.fill_background is False
+    assert widget.settings.fill_background is True
+    assert not widget._metrics_timer.isActive()
 
 
 def case_transparent_background() -> None:
-    """背景色关闭：圆形外角完全透明，圆环与文字不透明。"""
-    widget, _, _, _, _ = _new_widget()
+    """背景色关闭：圆角外完全透明，圆角描边可见。"""
+    widget, _, _, _, _ = _new_widget(
+        GpSettings(fill_background=False)
+    )
     widget.show()
     _process()
     QTest.qWait(100)
     image = widget.grab().toImage()
     assert image.hasAlphaChannel()
     corner = image.pixelColor(1, 1).alpha()
-    ring = image.pixelColor(widget.width() // 2, 4).alpha()
-    assert corner == 0, f"圆形外的角应当完全透明，实际 alpha={corner}"
-    assert ring > 0, f"圆环应当可见，实际 alpha={ring}"
+    box = widget._card_box()
+    edge_alphas = [
+        image.pixelColor(widget.width() // 2, y).alpha()
+        for y in range(
+            max(0, int(box.top()) - 2),
+            int(box.top()) + 3,
+        )
+    ]
+    assert corner == 0, f"圆角外应当完全透明，实际 alpha={corner}"
+    assert max(edge_alphas) > 0, f"圆角描边应当可见，实际 {edge_alphas}"
+
+
+def case_rounded_square_background() -> None:
+    """填充卡片是圆角方形，而不是圆形。"""
+    widget, _, _, _, _ = _new_widget()
+    widget.show()
+    _process()
+    QTest.qWait(100)
+    image = widget.grab().toImage()
+    assert image.pixelColor(1, 1).alpha() == 0
+    box = widget._card_box()
+    radius = widget._card_radius(box)
+    px = int(box.left() + radius * 0.4)
+    py = int(box.top() + radius * 0.4)
+    # 该点在圆角矩形内、但在旧圆形的外接圆之外。
+    assert image.pixelColor(px, py).alpha() > 0
+    center = image.pixelColor(
+        widget.width() // 2, widget.height() // 2
+    ).alpha()
+    assert center > 0
 
 
 def case_hover_opacity() -> None:
@@ -505,7 +578,7 @@ def case_settings_dialog_single_instance_and_placement() -> None:
     _process()
     dialog = controller._dialog
     assert dialog is not None
-    # 不能挂在圆形悬浮窗上，否则窗口管理器会把它摆到屏幕外。
+    # 不能挂在无边框悬浮窗上，否则窗口管理器会把它摆到屏幕外。
     assert dialog.parent() is None
     assert dialog.isVisible()
     assert dialog.width() >= 380
@@ -597,7 +670,7 @@ def case_context_menu_keeps_hover_opacity() -> None:
 
 
 def case_diameter_slider_sync() -> None:
-    """直径滑块 10–120 与手动输入 0–200 联动。"""
+    """边长滑块 10–120 与手动输入 0–200 联动。"""
     data_dir = Path(tempfile.mkdtemp(prefix="quicktools-gp-"))
     controller, _ = _new_controller(data_dir)
     controller.show()
@@ -627,7 +700,7 @@ def case_diameter_slider_sync() -> None:
     _process()
     assert dialog._diameter_slider.value() == 10
     assert widget.settings.diameter == 0
-    # 0 直径仍保留非零可点击区域；窗口管理器可能把极小窗口抬到它的
+    # 0 边长仍保留非零可点击区域；窗口管理器可能把极小窗口抬到它的
     # 最小尺寸，因此这里只要求小于上一步，不强制恰好 10px。
     assert 10 <= widget.width() < 300
 
@@ -670,7 +743,7 @@ def case_settings_dialog_stays_put_when_changed() -> None:
     _process()
     assert dialog.pos() == moved_to
 
-    # 改直径可能移动悬浮窗，但对话框必须留在用户放的位置。
+    # 改边长可能移动悬浮窗，但对话框必须留在用户放的位置。
     dialog._diameter_spin.setValue(180)
     QTest.qWait(150)
     _process()
@@ -833,6 +906,121 @@ def case_diameter_change_keeps_reachable() -> None:
     assert rect.right <= area.right
     assert rect.bottom <= area.bottom
     assert widget.width() == 250
+
+
+def case_metrics_sampling() -> None:
+    source = _FakeMetricsSource()
+    widget, _, saved, _, _ = _new_widget(metrics_source=source)
+    assert widget._usage == SystemUsage.empty()
+
+    widget.show_widget()
+    _process()
+    assert source.calls == 1
+    assert widget._usage.memory.percent == 42.0
+    assert widget._usage.disk.percent == 68.0
+
+    size = (widget.width(), widget.height())
+    position = widget.pos()
+    opacity = widget.windowOpacity()
+    source.memory_percent = 55.0
+    widget._refresh_metrics()
+    _process()
+    assert source.calls == 2
+    assert widget._usage.memory.percent == 55.0
+    assert (widget.width(), widget.height()) == size
+    assert widget.pos() == position
+    assert abs(widget.windowOpacity() - opacity) < 0.001
+    assert saved == []
+    widget.shutdown()
+
+
+def case_metrics_failure() -> None:
+    source = _FakeMetricsSource()
+    source.fail = True
+    widget, _, _, _, _ = _new_widget(metrics_source=source)
+    widget.show_widget()
+    _process()
+    assert widget._usage == SystemUsage.empty()
+    assert widget.isVisible()
+
+    source.fail = False
+    widget._refresh_metrics()
+    _process()
+    assert widget._usage.memory.percent == 42.0
+    widget.shutdown()
+
+
+def case_metrics_timer_lifecycle() -> None:
+    source = _FakeMetricsSource()
+    widget, _, _, _, _ = _new_widget(metrics_source=source)
+    assert not widget._metrics_timer.isActive()
+
+    widget.show_widget()
+    _process()
+    assert widget._metrics_timer.isActive()
+    assert source.calls == 1
+
+    widget.hide()
+    _process()
+    assert not widget._metrics_timer.isActive()
+    calls = source.calls
+
+    widget.show_widget()
+    _process()
+    assert widget._metrics_timer.isActive()
+    assert source.calls == calls + 1
+
+    widget.shutdown()
+    assert not widget._metrics_timer.isActive()
+    widget.shutdown()
+
+
+def case_metrics_does_not_persist() -> None:
+    data_dir = Path(tempfile.mkdtemp(prefix="quicktools-gp-"))
+    source = _FakeMetricsSource()
+    controller, _ = _new_controller(
+        data_dir, metrics_source=source
+    )
+    controller.show()
+    _process()
+    for _ in range(3):
+        controller._widget._refresh_metrics()
+    assert not controller._save_timer.isActive()
+    controller.flush()
+
+    stored = load_settings(data_dir)
+    assert stored.diameter == 200
+    assert stored.fill_background is True
+    assert stored.x is None
+    assert stored.y is None
+    raw = json.loads(
+        (data_dir / "settings.json").read_text(encoding="utf-8")
+    )
+    assert "text" not in raw
+    assert "memory" not in raw
+    assert "disk" not in raw
+    controller._widget.shutdown()
+
+
+def case_compact_layout() -> None:
+    widget, _, _, _, _ = _new_widget(GpSettings(diameter=91))
+    widget.show()
+    _process()
+    QTest.qWait(50)
+    assert widget.width() == 91
+    assert widget._is_compact_layout() is True
+    image = widget.grab().toImage()
+    assert image.pixelColor(1, 1).alpha() == 0
+    assert image.pixelColor(45, 45).alpha() > 0
+    widget.shutdown()
+
+    tiny, _, _, _, _ = _new_widget(GpSettings(diameter=10))
+    tiny.show()
+    _process()
+    QTest.qWait(50)
+    assert tiny.width() == 10
+    assert tiny.grab().toImage().width() == 10
+    tiny.shutdown()
 
 
 def case_input_click_through_follows_shift() -> None:
@@ -1004,13 +1192,20 @@ def case_context_menu_requires_shift() -> None:
 
 
 def case_win32_hit_fill() -> None:
-    widget, _, _, _, _ = _new_widget()
+    widget, _, _, _, _ = _new_widget(
+        GpSettings(fill_background=False)
+    )
     widget._windows_hit_fill_enabled = lambda: True
     widget.show()
     _process()
     QTest.qWait(100)
     image = widget.grab().toImage()
     assert image.pixelColor(1, 1).alpha() == 1
+    # 圆角外但仍在方形窗口内的位置也必须保留命中底色。
+    outside_corner = image.pixelColor(
+        int(widget.width() * 0.08), int(widget.height() * 0.08)
+    ).alpha()
+    assert outside_corner == 1
 
     widget._windows_hit_fill_enabled = lambda: False
     widget.update()
@@ -1018,6 +1213,12 @@ def case_win32_hit_fill() -> None:
     QTest.qWait(50)
     image = widget.grab().toImage()
     assert image.pixelColor(1, 1).alpha() == 0
+    assert (
+        image.pixelColor(
+            int(widget.width() * 0.08), int(widget.height() * 0.08)
+        ).alpha()
+        == 0
+    )
 
 
 def case_input_mode_x11_smoke() -> None:
@@ -1055,6 +1256,7 @@ def case_input_mode_x11_smoke() -> None:
 _CASES = {
     "defaults": case_defaults,
     "transparent_background": case_transparent_background,
+    "rounded_square_background": case_rounded_square_background,
     "hover_opacity": case_hover_opacity,
     "commands": case_commands,
     "drag_requires_shift": case_drag_requires_shift,
@@ -1084,6 +1286,11 @@ _CASES = {
     "settings_dialog_auto_saves": case_settings_dialog_auto_saves,
     "settings_dialog_reset_position": case_settings_dialog_reset_position,
     "diameter_change_keeps_reachable": case_diameter_change_keeps_reachable,
+    "metrics_sampling": case_metrics_sampling,
+    "metrics_failure": case_metrics_failure,
+    "metrics_timer_lifecycle": case_metrics_timer_lifecycle,
+    "metrics_does_not_persist": case_metrics_does_not_persist,
+    "compact_layout": case_compact_layout,
     "input_click_through_follows_shift": (
         case_input_click_through_follows_shift
     ),

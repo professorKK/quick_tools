@@ -58,6 +58,10 @@ def test_gp_widget_transparent_background() -> None:
     _run_case("transparent_background")
 
 
+def test_gp_widget_rounded_square_background() -> None:
+    _run_case("rounded_square_background")
+
+
 def test_gp_widget_hover_opacity() -> None:
     _run_case("hover_opacity")
 
@@ -132,6 +136,26 @@ def test_gp_settings_dialog_reset_position() -> None:
 
 def test_gp_diameter_change_keeps_reachable() -> None:
     _run_case("diameter_change_keeps_reachable")
+
+
+def test_gp_metrics_sampling() -> None:
+    _run_case("metrics_sampling")
+
+
+def test_gp_metrics_failure() -> None:
+    _run_case("metrics_failure")
+
+
+def test_gp_metrics_timer_lifecycle() -> None:
+    _run_case("metrics_timer_lifecycle")
+
+
+def test_gp_metrics_does_not_persist() -> None:
+    _run_case("metrics_does_not_persist")
+
+
+def test_gp_compact_layout() -> None:
+    _run_case("compact_layout")
 
 
 def test_gp_input_click_through_follows_shift() -> None:

@@ -26,6 +26,7 @@ hiddenimports = [
     'quicktools.plugins.gp.plugin',
     'quicktools.plugins.gp.host',
     'quicktools.plugins.gp.settings',
+    'quicktools.plugins.gp.metrics',
     'quicktools.plugins.gp.geometry',
     'quicktools.plugins.gp.qt_screens',
     'quicktools.plugins.gp.qt_helper',

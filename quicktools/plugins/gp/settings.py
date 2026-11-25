@@ -1,8 +1,8 @@
 """gp 插件设置，保存在插件数据目录下的 ``settings.json``。
 
 设置界面完全在 Qt helper 进程里，因此这个文件只由 helper 读写；Tk 主进程
-不碰它，避免两个进程抢写同一个文件。字段保持与旧版本兼容，只新增可选的
-``screen``（显示器名称）。
+不碰它，避免两个进程抢写同一个文件。旧版本还有一个固定显示文本的
+``text`` 字段，现在悬浮窗显示系统指标，该字段读入时忽略、下次保存后消失。
 """
 
 from __future__ import annotations
@@ -16,13 +16,13 @@ SETTINGS_NAME = "settings.json"
 
 DEFAULT_IDLE_OPACITY = 0.5
 DEFAULT_ACTIVE_OPACITY = 1.0
-DEFAULT_DIAMETER = 120
-DEFAULT_TEXT = "10vpn"
-DEFAULT_FILL_BACKGROUND = False
+DEFAULT_DIAMETER = 200
+DEFAULT_FILL_BACKGROUND = True
 
 MIN_OPACITY = 0.1
 MAX_OPACITY = 1.0
-# 手动输入范围；滑块只覆盖常用的 10–250。
+# 手动输入范围；滑块只覆盖常用的 10–250。``diameter`` 是历史字段名，
+# 现在表示正方形悬浮窗的边长。
 MIN_DIAMETER = 0
 MAX_DIAMETER = 1000
 SLIDER_MIN_DIAMETER = 10
@@ -43,7 +43,7 @@ def clamp_opacity(value: object, default: float = DEFAULT_IDLE_OPACITY) -> float
 
 
 def clamp_diameter(value: object, default: int = DEFAULT_DIAMETER) -> int:
-    """Return a usable diameter in ``[MIN_DIAMETER, MAX_DIAMETER]``.
+    """Return a usable side length in ``[MIN_DIAMETER, MAX_DIAMETER]``.
 
     ``MIN_DIAMETER`` is 0 because the settings dialog allows manual input down
     to 0; the widget keeps a small clickable render size so it can still be
@@ -67,13 +67,6 @@ def _clamp_coord(value: object) -> int | None:
         return None
 
 
-def _clean_text(value: object) -> str:
-    if not isinstance(value, str):
-        return DEFAULT_TEXT
-    text = value.strip()
-    return text or DEFAULT_TEXT
-
-
 def _clean_screen(value: object, x: int | None, y: int | None) -> str | None:
     """Keep a screen name only when it can accompany a saved position."""
     if x is None or y is None or not isinstance(value, str):
@@ -89,7 +82,6 @@ class GpSettings:
     idle_opacity: float = DEFAULT_IDLE_OPACITY
     active_opacity: float = DEFAULT_ACTIVE_OPACITY
     diameter: int = DEFAULT_DIAMETER
-    text: str = DEFAULT_TEXT
     fill_background: bool = DEFAULT_FILL_BACKGROUND
     x: int | None = None
     y: int | None = None
@@ -107,7 +99,6 @@ class GpSettings:
                 self.active_opacity, DEFAULT_ACTIVE_OPACITY
             ),
             diameter=clamp_diameter(self.diameter, DEFAULT_DIAMETER),
-            text=_clean_text(self.text),
             fill_background=bool(self.fill_background),
             x=x,
             y=y,
@@ -142,7 +133,6 @@ def load_settings(data_dir: Path | None) -> GpSettings:
             raw.get("active_opacity"), defaults.active_opacity
         ),
         diameter=clamp_diameter(raw.get("diameter"), defaults.diameter),
-        text=_clean_text(raw.get("text")),
         fill_background=(
             bool(raw.get("fill_background"))
             if isinstance(raw.get("fill_background"), bool)

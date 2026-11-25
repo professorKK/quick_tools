@@ -1,8 +1,8 @@
 """gp 悬浮窗的 PyQt 设置对话框。
 
 设置界面完全在 Qt 侧：修改即生效，控制器做一次防抖落盘，没有“保存设置”
-按钮。对话框**不设父窗口**：把无边框圆形悬浮窗当父级会被窗口管理器摆到
-屏幕外，定位由控制器在 ``adjustSize()`` 之后显式计算。
+按钮。对话框**不设父窗口**：把无边框悬浮窗当父级会被窗口管理器摆到屏幕
+外，定位由控制器在 ``adjustSize()`` 之后显式计算。
 """
 
 from __future__ import annotations
@@ -205,10 +205,19 @@ class SettingsDialog(QDialog):
         diameter_row = QHBoxLayout()
         diameter_row.addWidget(self._diameter_slider, 1)
         diameter_row.addWidget(self._diameter_spin)
-        form.addRow("悬浮窗直径", diameter_row)
+        form.addRow("悬浮窗边长", diameter_row)
 
-        self._fill_check = QCheckBox("填充圆圈背景色", group)
+        self._fill_check = QCheckBox("填充深色背景", group)
         form.addRow("", self._fill_check)
+
+        hint = QLabel(
+            "实时显示内存与系统盘占用，约每 2 秒刷新；"
+            "小于 160px 时使用紧凑布局。",
+            group,
+        )
+        hint.setObjectName("Subtitle")
+        hint.setWordWrap(True)
+        form.addRow("", hint)
 
         self._idle_slider.valueChanged.connect(self._on_slider_changed)
         self._active_slider.valueChanged.connect(self._on_slider_changed)
@@ -335,7 +344,6 @@ class SettingsDialog(QDialog):
             idle_opacity=self._idle_slider.value() / 100.0,
             active_opacity=self._active_slider.value() / 100.0,
             diameter=int(self._diameter_spin.value()),
-            text=base.text,
             fill_background=bool(self._fill_check.isChecked()),
             x=base.x,
             y=base.y,

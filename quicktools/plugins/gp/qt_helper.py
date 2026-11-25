@@ -17,6 +17,7 @@ from PyQt6.QtWidgets import QApplication
 
 from .geometry import Size, place_dialog, screen_for_rect
 from .input_mode import InputMode
+from .metrics import MetricsSampler
 from .qt_screens import rect_for, screen_areas
 from .qt_settings import SettingsDialog, read_plugin_info
 from .qt_widget import FloatingWidget
@@ -80,6 +81,7 @@ class GpController(QObject):
         plugin_dir: Path | None,
         settings: GpSettings,
         input_mode: InputMode | None = None,
+        metrics_source: MetricsSampler | None = None,
     ) -> None:
         super().__init__()
         self._app = app
@@ -95,6 +97,7 @@ class GpController(QObject):
             emit=emit_line,
             persist=self._persist_widget,
             input_mode=input_mode,
+            metrics_source=metrics_source,
         )
         # 设置项改动先即时生效，写盘合并到这个防抖定时器。
         self._save_timer = QTimer(self)
@@ -219,11 +222,11 @@ class GpController(QObject):
             return
         try:
             self._widget.apply_appearance(settings)
-            # 直径滑块会连续触发 valueChanged，统一走 400ms 防抖；拖动悬浮窗
+            # 边长滑块会连续触发 valueChanged，统一走 400ms 防抖；拖动悬浮窗
             # 和“恢复默认位置”仍然在 FloatingWidget 里立即落盘。
             self._save_timer.start()
             # 注意：不要在这里重新摆放设置对话框。用户可能已经把它拖到
-            # 别处；调整透明度/直径时强制归位会覆盖用户的手动位置。
+            # 别处；调整透明度/边长时强制归位会覆盖用户的手动位置。
             # 对话框只在 open_settings() 打开时定位一次。
         except Exception:
             log.exception("应用 gp 外观设置失败")

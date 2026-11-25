@@ -1,21 +1,29 @@
-"""gp 悬浮窗：桌面上的圆形无边框小窗。
+"""gp 悬浮窗：桌面上的圆角方形系统监控卡片。
 
 这个模块只运行在 helper 进程里（PyQt6 独立进程），主进程的 Tk 永远不会
-导入它，避免两套事件循环混用。
+导入它，避免两套事件循环混用。卡片周期显示内存与系统盘占用，采样由
+``metrics.py`` 负责，绘制时只读最新快照。
 """
 
 from __future__ import annotations
 
 import logging
+import math
 import sys
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from typing import Callable
 
-from PyQt6.QtCore import QPoint, QTimer, Qt
-from PyQt6.QtGui import QColor, QCursor, QFont, QPainter, QPen
+from PyQt6.QtCore import QPoint, QPointF, QRectF, QTimer, Qt
+from PyQt6.QtGui import (
+    QColor,
+    QCursor,
+    QFont,
+    QFontMetrics,
+    QPainter,
+    QPen,
+)
 from PyQt6.QtWidgets import QMenu, QWidget
 
-from .input_mode import InputMode, UnsupportedInputMode, create_input_mode
 from .geometry import (
     SCREEN_MARGIN,
     Rect,
@@ -27,12 +35,21 @@ from .geometry import (
     screen_by_name,
     screen_for_rect,
 )
+from .input_mode import InputMode, UnsupportedInputMode, create_input_mode
+from .metrics import (
+    METRICS_INTERVAL_MS,
+    MetricsSampler,
+    SystemUsage,
+    UsageStat,
+    format_percent,
+    format_usage_detail,
+)
 from .qt_screens import (
     primary_screen_name,
     rect_for,
     screen_areas,
 )
-from .settings import DEFAULT_TEXT, GpSettings
+from .settings import GpSettings
 
 log = logging.getLogger(__name__)
 
@@ -42,24 +59,53 @@ INPUT_POLL_INTERVAL_MS = 30
 # alpha=1/255 铺满整个矩形，保证 Shift 按住时透明角落也能点击。
 WIN32_HIT_FILL_ALPHA = 1
 
-# 填充背景关闭时的描边色与文字色：保持透明圆圈也能看清。
+# 小于该边长时使用紧凑布局（名称 + 百分比 + 细进度条）。
+FULL_LAYOUT_MIN_DIAMETER = 160
+# 再小就只画卡片，避免文字和进度条挤成噪点；10px 恢复入口仍可右键。
+MIN_TEXT_DIAMETER = 48
+
+# 深色卡片配色，参考用户提供的系统监控卡片。
+CARD_COLOR = QColor("#1b2430")
+CARD_BORDER_COLOR = QColor("#334155")
+CARD_TEXT_COLOR = QColor("#f8fafc")
+CARD_SECONDARY_TEXT_COLOR = QColor("#94a3b8")
+CARD_DIVIDER_COLOR = QColor("#334155")
+CARD_TRACK_COLOR = QColor("#334155")
+MEMORY_COLOR = QColor("#2dd4bf")
+DISK_COLOR = QColor("#3b82f6")
+
+# 关闭填充时的透明背景配色：深色文字加白色描边，浅色桌面上也能读。
 RING_COLOR = QColor("#94a3b8")
 TEXT_COLOR = QColor("#0f172a")
+SECONDARY_TEXT_COLOR = QColor("#475569")
 TEXT_HALO_COLOR = QColor("#ffffff")
-# 填充背景打开时的配色。
-FILLED_RING_COLOR = QColor("#ffffff")
-FILLED_TEXT_COLOR = QColor("#ffffff")
-FILL_COLOR = QColor("#2563eb")
+DIVIDER_COLOR = QColor(148, 163, 184, 150)
+TRACK_COLOR = QColor("#cbd5e1")
+LIGHT_MEMORY_COLOR = QColor("#0d9488")
+LIGHT_DISK_COLOR = QColor("#2563eb")
 
 EVENT_CLOSED = "closed"
 
-# 手动输入允许直径 0，但窗口至少保留这么大的可点击区域，避免完全消失后
+# 手动输入允许边长 0，但窗口至少保留这么大的可点击区域，避免完全消失后
 # 无法再右键打开设置恢复。
 MIN_RENDER_DIAMETER = 10
 
 
+@dataclass(frozen=True)
+class _Palette:
+    card: QColor | None
+    border: QColor
+    primary: QColor
+    secondary: QColor
+    divider: QColor
+    track: QColor
+    memory: QColor
+    disk: QColor
+    halo: QColor | None
+
+
 class FloatingWidget(QWidget):
-    """A circular, always-on-top desktop widget with hover transparency."""
+    """A rounded-square, always-on-top system monitor widget."""
 
     def __init__(
         self,
@@ -70,6 +116,7 @@ class FloatingWidget(QWidget):
         emit: Callable[[str], None],
         persist: Callable[[GpSettings], None],
         input_mode: InputMode | None = None,
+        metrics_source: MetricsSampler | None = None,
     ) -> None:
         super().__init__(None)
         self._on_open_settings = on_open_settings
@@ -100,6 +147,15 @@ class FloatingWidget(QWidget):
         self._shift_timer.setTimerType(Qt.TimerType.PreciseTimer)
         self._shift_timer.setInterval(INPUT_POLL_INTERVAL_MS)
         self._shift_timer.timeout.connect(self._poll_shift)
+
+        self._metrics_source = metrics_source or MetricsSampler()
+        self._usage = SystemUsage.empty()
+        self._metrics_failed = False
+        self._metrics_timer = QTimer(self)
+        self._metrics_timer.setInterval(METRICS_INTERVAL_MS)
+        self._metrics_timer.setTimerType(Qt.TimerType.CoarseTimer)
+        self._metrics_timer.timeout.connect(self._refresh_metrics)
+
         self.setWindowFlags(
             Qt.WindowType.FramelessWindowHint
             | Qt.WindowType.WindowStaysOnTopHint
@@ -109,7 +165,7 @@ class FloatingWidget(QWidget):
         # 不抢焦点，悬浮窗只是安静地待在桌面上。
         self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating, True)
         self.setMouseTracking(True)
-        self.setWindowTitle("gp 插件")
+        self.setWindowTitle("gp 系统监控")
         render_diameter = max(self._settings.diameter, MIN_RENDER_DIAMETER)
         self.setFixedSize(render_diameter, render_diameter)
         self._apply_opacity()
@@ -141,7 +197,6 @@ class FloatingWidget(QWidget):
             idle_opacity=normalized.idle_opacity,
             active_opacity=normalized.active_opacity,
             diameter=normalized.diameter,
-            text=normalized.text,
             fill_background=normalized.fill_background,
         )
         moved = False
@@ -154,7 +209,7 @@ class FloatingWidget(QWidget):
         return moved
 
     def _reposition_after_resize(self, old_rect: Rect) -> bool:
-        """Keep the circle centered and fully inside a screen after resizing."""
+        """Keep the widget centered and fully inside a screen after resizing."""
         screens = screen_areas()
         size = Size(self.width(), self.height())
         if self._settings.x is None or self._settings.y is None:
@@ -196,6 +251,7 @@ class FloatingWidget(QWidget):
         if self._shift_timer.isActive():
             self._poll_shift()
         self._sync_input_mode(force=True)
+        self._start_metrics_polling()
 
     def reset_position(self) -> None:
         """Forget the saved coordinates and go back to the default corner."""
@@ -219,6 +275,34 @@ class FloatingWidget(QWidget):
             else self._settings.idle_opacity
         )
         self.setWindowOpacity(max(0.05, min(1.0, float(value))))
+
+    # ------------------------------------------------------------ metrics
+    def _start_metrics_polling(self) -> None:
+        if self._shutdown:
+            return
+        self._refresh_metrics()
+        if not self._metrics_timer.isActive():
+            self._metrics_timer.start()
+
+    def _refresh_metrics(self) -> None:
+        if self._shutdown:
+            return
+        try:
+            usage = self._metrics_source.sample()
+        except Exception:
+            if not self._metrics_failed:
+                self._metrics_failed = True
+                log.exception("刷新 gp 系统指标失败，悬浮窗显示 --")
+            usage = SystemUsage.empty()
+        else:
+            if self._metrics_failed:
+                self._metrics_failed = False
+                log.info("gp 系统指标刷新已恢复")
+        if not isinstance(usage, SystemUsage):
+            usage = SystemUsage.empty()
+        if usage != self._usage:
+            self._usage = usage
+            self.update()
 
     # ----------------------------------------------------------- input mode
     def _start_input_polling(self) -> None:
@@ -319,6 +403,7 @@ class FloatingWidget(QWidget):
             return
         self._shutdown = True
         self._shift_timer.stop()
+        self._metrics_timer.stop()
         self._dragging = False
         self._drag_offset = None
         try:
@@ -335,43 +420,480 @@ class FloatingWidget(QWidget):
     def _windows_hit_fill_enabled() -> bool:
         return sys.platform == "win32"
 
+    def _palette(self) -> _Palette:
+        if self._settings.fill_background:
+            return _Palette(
+                card=CARD_COLOR,
+                border=CARD_BORDER_COLOR,
+                primary=CARD_TEXT_COLOR,
+                secondary=CARD_SECONDARY_TEXT_COLOR,
+                divider=CARD_DIVIDER_COLOR,
+                track=CARD_TRACK_COLOR,
+                memory=MEMORY_COLOR,
+                disk=DISK_COLOR,
+                halo=None,
+            )
+        return _Palette(
+            card=None,
+            border=RING_COLOR,
+            primary=TEXT_COLOR,
+            secondary=SECONDARY_TEXT_COLOR,
+            divider=DIVIDER_COLOR,
+            track=TRACK_COLOR,
+            memory=LIGHT_MEMORY_COLOR,
+            disk=LIGHT_DISK_COLOR,
+            halo=TEXT_HALO_COLOR,
+        )
+
+    def _card_box(self) -> QRectF:
+        size = min(self.width(), self.height())
+        margin = max(2.0, size * 0.07)
+        return QRectF(
+            margin,
+            margin,
+            max(1.0, self.width() - 2 * margin),
+            max(1.0, self.height() - 2 * margin),
+        )
+
+    @staticmethod
+    def _card_radius(box: QRectF) -> float:
+        return max(2.0, min(box.width(), box.height()) * 0.14)
+
+    def _is_compact_layout(self) -> bool:
+        return min(self.width(), self.height()) < FULL_LAYOUT_MIN_DIAMETER
+
+    def _content_rect(self, box: QRectF) -> QRectF:
+        size = min(self.width(), self.height())
+        pad = max(4.0, min(10.0, size * 0.045))
+        return box.adjusted(pad, pad, -pad, -pad)
+
+    def _section_rects(self, box: QRectF) -> tuple[QRectF, QRectF]:
+        content = self._content_rect(box)
+        half = content.height() / 2.0
+        return (
+            QRectF(content.left(), content.top(), content.width(), half),
+            QRectF(
+                content.left(),
+                content.top() + half,
+                content.width(),
+                half,
+            ),
+        )
+
+    def _pixel_font(
+        self,
+        pixel_size: float,
+        *,
+        min_px: int,
+        max_px: int,
+        bold: bool,
+    ) -> QFont:
+        font = QFont(self.font())
+        font.setPixelSize(
+            max(min_px, min(max_px, int(round(pixel_size))))
+        )
+        font.setBold(bold)
+        return font
+
     def paintEvent(self, event) -> None:  # noqa: N802 - Qt naming
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
         if self._windows_hit_fill_enabled():
-            # Windows 分层窗口会跳过完全透明的像素，导致 Shift 按住时圆外
-            # 透明角落仍不可点击；铺一层 alpha=1/255 的底色让整个方形可命中。
+            # Windows 分层窗口会跳过完全透明的像素，导致 Shift 按住时圆角
+            # 外区域仍不可点击；铺一层 alpha=1/255 的底色让整个方形可命中。
             painter.fillRect(
                 self.rect(), QColor(0, 0, 0, WIN32_HIT_FILL_ALPHA)
             )
-        margin = max(2, self.width() // 24)
-        box = self.rect().adjusted(margin, margin, -margin, -margin)
-        filled = self._settings.fill_background
-        if filled:
-            painter.setBrush(FILL_COLOR)
-            painter.setPen(QPen(FILLED_RING_COLOR, max(1.0, self.width() / 48.0)))
+        palette = self._palette()
+        box = self._card_box()
+        radius = self._card_radius(box)
+        self._draw_card_background(painter, box, radius, palette)
+        if min(self.width(), self.height()) < MIN_TEXT_DIAMETER:
+            return
+        self._draw_divider(painter, box, palette)
+        if self._is_compact_layout():
+            self._draw_compact_layout(painter, box, palette)
         else:
-            # 背景色关闭：圆圈只留一圈描边，中间完全透明。
-            painter.setBrush(Qt.BrushStyle.NoBrush)
-            painter.setPen(QPen(RING_COLOR, max(1.0, self.width() / 48.0)))
-        painter.drawEllipse(box)
-        self._draw_text(painter, box)
+            self._draw_full_layout(painter, box, palette)
 
-    def _draw_text(self, painter: QPainter, box) -> None:
-        text = self._settings.text or DEFAULT_TEXT
-        font = QFont(self.font())
-        font.setBold(True)
-        font.setPointSizeF(max(8.0, self.width() * 0.19))
-        painter.setFont(font)
-        if not self._settings.fill_background:
-            # 透明背景下先描一圈浅色边，浅色桌面上也能看清文字。
-            painter.setPen(QPen(TEXT_HALO_COLOR, max(2.0, self.width() / 30.0)))
+    def _draw_card_background(
+        self,
+        painter: QPainter,
+        box: QRectF,
+        radius: float,
+        palette: _Palette,
+    ) -> None:
+        if palette.card is None:
             painter.setBrush(Qt.BrushStyle.NoBrush)
-            painter.drawText(box, Qt.AlignmentFlag.AlignCenter, text)
-        color = FILLED_TEXT_COLOR if self._settings.fill_background else TEXT_COLOR
+        else:
+            painter.setBrush(palette.card)
+        border_width = max(
+            1.0, min(3.0, min(self.width(), self.height()) / 160.0)
+        )
+        painter.setPen(QPen(palette.border, border_width))
+        painter.drawRoundedRect(box, radius, radius)
+
+    def _draw_divider(
+        self, painter: QPainter, box: QRectF, palette: _Palette
+    ) -> None:
+        size = min(self.width(), self.height())
+        inset = max(6.0, size * 0.08)
+        y = box.center().y()
+        painter.setPen(QPen(palette.divider, 1.0))
+        painter.drawLine(
+            QPointF(box.left() + inset, y),
+            QPointF(box.right() - inset, y),
+        )
+
+    def _draw_full_layout(
+        self, painter: QPainter, box: QRectF, palette: _Palette
+    ) -> None:
+        sections = self._section_rects(box)
+        entries = (
+            ("内存", self._usage.memory, palette.memory, self._draw_memory_icon),
+            ("磁盘", self._usage.disk, palette.disk, self._draw_disk_icon),
+        )
+        for rect, (label, usage, accent, icon) in zip(sections, entries):
+            self._draw_full_section(
+                painter, rect, label, usage, accent, icon, palette
+            )
+
+    def _draw_full_section(
+        self,
+        painter: QPainter,
+        rect: QRectF,
+        label: str,
+        usage: UsageStat,
+        accent: QColor,
+        icon: Callable[[QPainter, QRectF, QColor], None],
+        palette: _Palette,
+    ) -> None:
+        size = min(self.width(), self.height())
+        label_font = self._pixel_font(
+            size * 0.065, min_px=9, max_px=52, bold=True
+        )
+        percent_font = self._pixel_font(
+            size * 0.095, min_px=12, max_px=96, bold=True
+        )
+        detail_font = self._pixel_font(
+            size * 0.052, min_px=8, max_px=40, bold=False
+        )
+        gap = max(3.0, size * 0.03)
+        bar_height = max(4.0, min(24.0, size * 0.035))
+        detail_height = float(QFontMetrics(detail_font).height())
+        header_height = max(
+            float(QFontMetrics(percent_font).height()),
+            size * 0.12,
+        )
+        icon_size = max(
+            10.0, min(header_height * 0.9, size * 0.13)
+        )
+        block_height = (
+            header_height + gap + bar_height + gap + detail_height
+        )
+        top = rect.top() + max(0.0, (rect.height() - block_height) / 2.0)
+
+        icon_rect = QRectF(
+            rect.left(),
+            top + (header_height - icon_size) / 2.0,
+            icon_size,
+            icon_size,
+        )
+        icon(painter, icon_rect, accent)
+        label_left = icon_rect.right() + max(2.0, size * 0.03)
+        label_right = rect.left() + rect.width() * 0.55
+        label_rect = QRectF(
+            label_left,
+            top,
+            max(0.0, label_right - label_left),
+            header_height,
+        )
+        percent_rect = QRectF(
+            rect.left() + rect.width() * 0.55,
+            top,
+            rect.width() * 0.45,
+            header_height,
+        )
+        self._draw_text(
+            painter,
+            label_rect,
+            label,
+            label_font,
+            palette.primary,
+            palette.halo,
+            Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
+        )
+        self._draw_text(
+            painter,
+            percent_rect,
+            format_percent(usage.percent),
+            percent_font,
+            palette.primary,
+            palette.halo,
+            Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter,
+        )
+
+        bar_top = top + header_height + gap
+        bar_rect = QRectF(rect.left(), bar_top, rect.width(), bar_height)
+        self._draw_bar(
+            painter, bar_rect, usage.percent, accent, palette.track
+        )
+
+        detail_top = bar_rect.bottom() + gap
+        detail_rect = QRectF(
+            rect.left(),
+            detail_top,
+            rect.width(),
+            detail_height,
+        )
+        self._draw_text(
+            painter,
+            detail_rect,
+            format_usage_detail(usage.used, usage.total),
+            detail_font,
+            palette.secondary,
+            palette.halo,
+            Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
+        )
+
+    def _draw_compact_layout(
+        self, painter: QPainter, box: QRectF, palette: _Palette
+    ) -> None:
+        sections = self._section_rects(box)
+        size = min(self.width(), self.height())
+        label_font = self._pixel_font(
+            size * 0.10, min_px=8, max_px=24, bold=True
+        )
+        percent_font = self._pixel_font(
+            size * 0.115, min_px=9, max_px=36, bold=True
+        )
+        label_metrics = QFontMetrics(label_font)
+        percent_metrics = QFontMetrics(percent_font)
+        header_height = float(
+            max(label_metrics.height(), percent_metrics.height())
+        )
+        gap = max(3.0, size * 0.035)
+        bar_height = max(3.0, min(12.0, size * 0.035))
+        block_height = header_height + gap + bar_height
+
+        entries = (
+            ("内存", self._usage.memory, palette.memory),
+            ("磁盘", self._usage.disk, palette.disk),
+        )
+        for rect, (label, usage, accent) in zip(sections, entries):
+            top = rect.top() + max(
+                0.0, (rect.height() - block_height) / 2.0
+            )
+            percent_text = format_percent(usage.percent)
+            label_width = float(label_metrics.horizontalAdvance(label))
+            percent_width = float(
+                percent_metrics.horizontalAdvance(percent_text)
+            )
+            show_label = (
+                label_width + percent_width + max(2.0, size * 0.04)
+                <= rect.width()
+            )
+            if show_label:
+                label_rect = QRectF(
+                    rect.left(), top, rect.width() * 0.45, header_height
+                )
+                percent_rect = QRectF(
+                    rect.left() + rect.width() * 0.45,
+                    top,
+                    rect.width() * 0.55,
+                    header_height,
+                )
+                self._draw_text(
+                    painter,
+                    label_rect,
+                    label,
+                    label_font,
+                    palette.primary,
+                    palette.halo,
+                    Qt.AlignmentFlag.AlignLeft
+                    | Qt.AlignmentFlag.AlignVCenter,
+                )
+            else:
+                percent_rect = QRectF(
+                    rect.left(), top, rect.width(), header_height
+                )
+            self._draw_text(
+                painter,
+                percent_rect,
+                percent_text,
+                percent_font,
+                palette.primary,
+                palette.halo,
+                Qt.AlignmentFlag.AlignRight
+                | Qt.AlignmentFlag.AlignVCenter,
+            )
+            bar_rect = QRectF(
+                rect.left(),
+                top + header_height + gap,
+                rect.width(),
+                bar_height,
+            )
+            self._draw_bar(
+                painter, bar_rect, usage.percent, accent, palette.track
+            )
+
+    def _draw_text(
+        self,
+        painter: QPainter,
+        rect: QRectF,
+        text: str,
+        font: QFont,
+        color: QColor,
+        halo: QColor | None,
+        alignment: Qt.AlignmentFlag,
+    ) -> None:
+        if not text or rect.width() <= 0 or rect.height() <= 0:
+            return
+        painter.setFont(font)
+        if halo is not None:
+            halo_width = max(
+                1.5, min(3.0, min(self.width(), self.height()) / 70.0)
+            )
+            painter.setPen(QPen(halo, halo_width))
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            painter.drawText(rect, int(alignment), text)
         painter.setPen(QPen(color))
         painter.setBrush(color)
-        painter.drawText(box, Qt.AlignmentFlag.AlignCenter, text)
+        painter.drawText(rect, int(alignment), text)
+
+    def _draw_bar(
+        self,
+        painter: QPainter,
+        rect: QRectF,
+        percent: float | None,
+        color: QColor,
+        track: QColor,
+    ) -> None:
+        radius = rect.height() / 2.0
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(track)
+        painter.drawRoundedRect(rect, radius, radius)
+        if percent is None:
+            return
+        try:
+            value = float(percent)
+        except (TypeError, ValueError):
+            return
+        if not math.isfinite(value):
+            return
+        value = max(0.0, min(100.0, value))
+        if value <= 0:
+            return
+        width = rect.width() * value / 100.0
+        width = max(0.0, min(width, rect.width()))
+        if width <= 0:
+            return
+        fill_radius = min(radius, width / 2.0)
+        fill = QRectF(rect.left(), rect.top(), width, rect.height())
+        painter.setBrush(color)
+        painter.drawRoundedRect(fill, fill_radius, fill_radius)
+
+    def _draw_memory_icon(
+        self, painter: QPainter, rect: QRectF, color: QColor
+    ) -> None:
+        painter.save()
+        pen_width = max(1.0, min(4.0, rect.width() * 0.09))
+        pen = QPen(color, pen_width)
+        pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+        pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
+        painter.setPen(pen)
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        body = rect.adjusted(
+            rect.width() * 0.18,
+            rect.height() * 0.24,
+            -rect.width() * 0.18,
+            -rect.height() * 0.24,
+        )
+        painter.drawRoundedRect(
+            body, rect.width() * 0.10, rect.width() * 0.10
+        )
+        pin_length = rect.height() * 0.15
+        for fraction in (0.30, 0.50, 0.70):
+            x = body.left() + body.width() * fraction
+            painter.drawLine(
+                QPointF(x, body.top()),
+                QPointF(x, body.top() - pin_length),
+            )
+            painter.drawLine(
+                QPointF(x, body.bottom()),
+                QPointF(x, body.bottom() + pin_length),
+            )
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(color)
+        cell_width = body.width() * 0.16
+        cell_height = body.height() * 0.52
+        for fraction in (0.18, 0.42, 0.66):
+            x = body.left() + body.width() * fraction
+            painter.drawRoundedRect(
+                QRectF(
+                    x,
+                    body.center().y() - cell_height / 2.0,
+                    cell_width,
+                    cell_height,
+                ),
+                cell_width * 0.25,
+                cell_width * 0.25,
+            )
+        painter.restore()
+
+    def _draw_disk_icon(
+        self, painter: QPainter, rect: QRectF, color: QColor
+    ) -> None:
+        painter.save()
+        pen_width = max(1.0, min(4.0, rect.width() * 0.09))
+        pen = QPen(color, pen_width)
+        pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+        pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
+        painter.setPen(pen)
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        body = QRectF(
+            rect.left() + rect.width() * 0.08,
+            rect.top() + rect.height() * 0.24,
+            rect.width() * 0.84,
+            rect.height() * 0.52,
+        )
+        painter.drawRoundedRect(
+            body, rect.width() * 0.10, rect.width() * 0.10
+        )
+        line_y = body.top() + body.height() * 0.58
+        painter.drawLine(
+            QPointF(
+                body.left() + body.width() * 0.12,
+                line_y,
+            ),
+            QPointF(
+                body.right() - body.width() * 0.12,
+                line_y,
+            ),
+        )
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(color)
+        led_radius = max(0.8, rect.width() * 0.035)
+        painter.drawEllipse(
+            QPointF(
+                body.right() - body.width() * 0.18,
+                line_y + body.height() * 0.22,
+            ),
+            led_radius,
+            led_radius,
+        )
+        slot_height = max(1.0, rect.height() * 0.05)
+        painter.drawRoundedRect(
+            QRectF(
+                body.left() + body.width() * 0.12,
+                line_y + body.height() * 0.16,
+                body.width() * 0.28,
+                slot_height,
+            ),
+            slot_height / 2.0,
+            slot_height / 2.0,
+        )
+        painter.restore()
 
     # --------------------------------------------------------------- events
     def enterEvent(self, event) -> None:  # noqa: N802 - Qt naming
@@ -481,6 +1003,7 @@ class FloatingWidget(QWidget):
     def hideEvent(self, event) -> None:  # noqa: N802 - Qt naming
         # 隐藏时取消半途的拖动，不保存中间位置。
         self._shift_timer.stop()
+        self._metrics_timer.stop()
         self._dragging = False
         self._drag_offset = None
         super().hideEvent(event)

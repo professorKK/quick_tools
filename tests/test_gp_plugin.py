@@ -44,12 +44,12 @@ def test_settings_defaults(tmp_path: Path) -> None:
     settings = load_settings(tmp_path)
     assert settings.idle_opacity == 0.5
     assert settings.active_opacity == 1.0
-    assert settings.diameter == 120
-    assert settings.text == "10vpn"
-    assert settings.fill_background is False
+    assert settings.diameter == 200
+    assert settings.fill_background is True
     assert settings.x is None
     assert settings.y is None
     assert settings.screen is None
+    assert not hasattr(settings, "text")
 
 
 def test_settings_round_trip(tmp_path: Path) -> None:
@@ -59,7 +59,6 @@ def test_settings_round_trip(tmp_path: Path) -> None:
             idle_opacity=0.3,
             active_opacity=0.85,
             diameter=150,
-            text="10vpn",
             fill_background=True,
             x=120,
             y=240,
@@ -77,6 +76,8 @@ def test_settings_round_trip(tmp_path: Path) -> None:
     stored = json.loads(settings_path(tmp_path).read_text(encoding="utf-8"))
     assert stored["idle_opacity"] == 0.3
     assert stored["screen"] == "DP-2"
+    # 固定文本字段已移除，旧文件里的 text 会在下次保存后消失。
+    assert "text" not in stored
     # 原子写入，不留下临时文件。
     assert not settings_path(tmp_path).with_name("settings.json.tmp").exists()
 
@@ -99,10 +100,11 @@ def test_settings_legacy_file_without_screen(tmp_path: Path) -> None:
     loaded = load_settings(tmp_path)
     assert loaded.idle_opacity == 0.4
     assert loaded.diameter == 140
-    assert loaded.text == "旧配置"
     assert loaded.x == 300
     assert loaded.y == 400
     assert loaded.screen is None
+    # 旧配置的固定文本会被忽略，不影响新指标布局。
+    assert not hasattr(loaded, "text")
 
 
 def test_settings_invalid_values_fall_back(tmp_path: Path) -> None:
@@ -125,8 +127,7 @@ def test_settings_invalid_values_fall_back(tmp_path: Path) -> None:
     assert loaded.idle_opacity == 0.5
     assert loaded.active_opacity == 1.0
     assert loaded.diameter == 0
-    assert loaded.text == "10vpn"
-    assert loaded.fill_background is False
+    assert loaded.fill_background is True
     assert loaded.x is None
     assert loaded.y is None
     # 没有有效坐标时，屏幕名没有意义，必须一起丢弃。
@@ -135,7 +136,7 @@ def test_settings_invalid_values_fall_back(tmp_path: Path) -> None:
 
 def test_settings_broken_file_falls_back(tmp_path: Path) -> None:
     settings_path(tmp_path).write_text("{not json", encoding="utf-8")
-    assert load_settings(tmp_path).diameter == 120
+    assert load_settings(tmp_path).diameter == 200
 
 
 def test_settings_nan_opacity_falls_back() -> None:
@@ -216,7 +217,7 @@ def test_builtin_manifest_is_discoverable(tmp_path: Path) -> None:
     assert meta.class_name == "GpPlugin"
     assert meta.summary
     assert meta.description
-    assert meta.version == "0.3.0"
+    assert meta.version == "0.4.0"
 
 
 # ------------------------------------------------------------------- 约束
