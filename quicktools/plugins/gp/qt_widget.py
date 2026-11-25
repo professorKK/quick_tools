@@ -43,6 +43,7 @@ from .metrics import (
     UsageStat,
     format_percent,
     format_usage_detail,
+    is_critical,
 )
 from .qt_screens import (
     primary_screen_name,
@@ -73,6 +74,9 @@ CARD_DIVIDER_COLOR = QColor("#334155")
 CARD_TRACK_COLOR = QColor("#334155")
 MEMORY_COLOR = QColor("#2dd4bf")
 DISK_COLOR = QColor("#3b82f6")
+# 达到 95% 时的警示色；深色卡片用亮红，透明背景用更深的红。
+CRITICAL_COLOR = QColor("#ef4444")
+CRITICAL_BAR_SCALE = 1.6
 
 # 关闭填充时的透明背景配色：深色文字加白色描边，浅色桌面上也能读。
 RING_COLOR = QColor("#94a3b8")
@@ -83,6 +87,7 @@ DIVIDER_COLOR = QColor(148, 163, 184, 150)
 TRACK_COLOR = QColor("#cbd5e1")
 LIGHT_MEMORY_COLOR = QColor("#0d9488")
 LIGHT_DISK_COLOR = QColor("#2563eb")
+LIGHT_CRITICAL_COLOR = QColor("#dc2626")
 
 EVENT_CLOSED = "closed"
 
@@ -101,6 +106,7 @@ class _Palette:
     track: QColor
     memory: QColor
     disk: QColor
+    critical: QColor
     halo: QColor | None
 
 
@@ -431,6 +437,7 @@ class FloatingWidget(QWidget):
                 track=CARD_TRACK_COLOR,
                 memory=MEMORY_COLOR,
                 disk=DISK_COLOR,
+                critical=CRITICAL_COLOR,
                 halo=None,
             )
         return _Palette(
@@ -442,6 +449,7 @@ class FloatingWidget(QWidget):
             track=TRACK_COLOR,
             memory=LIGHT_MEMORY_COLOR,
             disk=LIGHT_DISK_COLOR,
+            critical=LIGHT_CRITICAL_COLOR,
             halo=TEXT_HALO_COLOR,
         )
 
@@ -545,6 +553,15 @@ class FloatingWidget(QWidget):
             QPointF(box.right() - inset, y),
         )
 
+    def _bar_height(
+        self, size: float, *, compact: bool, critical: bool
+    ) -> float:
+        if compact:
+            base = max(3.0, min(12.0, size * 0.035))
+        else:
+            base = max(4.0, min(24.0, size * 0.035))
+        return base * (CRITICAL_BAR_SCALE if critical else 1.0)
+
     def _draw_full_layout(
         self, painter: QPainter, box: QRectF, palette: _Palette
     ) -> None:
@@ -579,7 +596,10 @@ class FloatingWidget(QWidget):
             size * 0.052, min_px=8, max_px=40, bold=False
         )
         gap = max(3.0, size * 0.03)
-        bar_height = max(4.0, min(24.0, size * 0.035))
+        critical = is_critical(usage.percent)
+        bar_height = self._bar_height(
+            size, compact=False, critical=critical
+        )
         detail_height = float(QFontMetrics(detail_font).height())
         header_height = max(
             float(QFontMetrics(percent_font).height()),
@@ -635,8 +655,9 @@ class FloatingWidget(QWidget):
 
         bar_top = top + header_height + gap
         bar_rect = QRectF(rect.left(), bar_top, rect.width(), bar_height)
+        bar_color = palette.critical if critical else accent
         self._draw_bar(
-            painter, bar_rect, usage.percent, accent, palette.track
+            painter, bar_rect, usage.percent, bar_color, palette.track
         )
 
         detail_top = bar_rect.bottom() + gap
@@ -673,14 +694,17 @@ class FloatingWidget(QWidget):
             max(label_metrics.height(), percent_metrics.height())
         )
         gap = max(3.0, size * 0.035)
-        bar_height = max(3.0, min(12.0, size * 0.035))
-        block_height = header_height + gap + bar_height
 
         entries = (
             ("内存", self._usage.memory, palette.memory),
             ("磁盘", self._usage.disk, palette.disk),
         )
         for rect, (label, usage, accent) in zip(sections, entries):
+            critical = is_critical(usage.percent)
+            bar_height = self._bar_height(
+                size, compact=True, critical=critical
+            )
+            block_height = header_height + gap + bar_height
             top = rect.top() + max(
                 0.0, (rect.height() - block_height) / 2.0
             )
@@ -733,8 +757,9 @@ class FloatingWidget(QWidget):
                 rect.width(),
                 bar_height,
             )
+            bar_color = palette.critical if critical else accent
             self._draw_bar(
-                painter, bar_rect, usage.percent, accent, palette.track
+                painter, bar_rect, usage.percent, bar_color, palette.track
             )
 
     def _draw_text(

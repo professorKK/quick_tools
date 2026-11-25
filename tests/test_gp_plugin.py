@@ -217,7 +217,7 @@ def test_builtin_manifest_is_discoverable(tmp_path: Path) -> None:
     assert meta.class_name == "GpPlugin"
     assert meta.summary
     assert meta.description
-    assert meta.version == "0.4.0"
+    assert meta.version == "0.4.1"
 
 
 # ------------------------------------------------------------------- 约束

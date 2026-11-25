@@ -22,6 +22,9 @@ log = logging.getLogger(__name__)
 # 悬浮窗刷新周期；放在这里方便测试和文档引用同一个值。
 METRICS_INTERVAL_MS = 2000
 
+# 达到该百分比时，悬浮窗用红色加粗进度条提醒。
+CRITICAL_USAGE_PERCENT = 95.0
+
 GIB = 1024**3
 MEMINFO_PATH = Path("/proc/meminfo")
 
@@ -144,6 +147,17 @@ def system_disk_path() -> str:
 def read_disk_usage() -> UsageStat:
     usage = shutil.disk_usage(system_disk_path())
     return usage_from_counts(int(usage.used), int(usage.total))
+
+
+def is_critical(percent: float | None) -> bool:
+    """Whether a usage percentage should be shown as a critical warning."""
+    if percent is None or isinstance(percent, bool):
+        return False
+    try:
+        value = float(percent)
+    except (TypeError, ValueError):
+        return False
+    return math.isfinite(value) and value >= CRITICAL_USAGE_PERCENT
 
 
 def format_percent(value: float | None) -> str:

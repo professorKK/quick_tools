@@ -158,6 +158,10 @@ def test_gp_compact_layout() -> None:
     _run_case("compact_layout")
 
 
+def test_gp_critical_usage_bar() -> None:
+    _run_case("critical_usage_bar")
+
+
 def test_gp_input_click_through_follows_shift() -> None:
     _run_case("input_click_through_follows_shift")
 

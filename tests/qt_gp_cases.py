@@ -21,7 +21,7 @@ if sys.platform.startswith("linux") and not os.environ.get("DISPLAY"):
     os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PyQt6.QtCore import QEvent, QPoint, QPointF, Qt, QTimer
-from PyQt6.QtGui import QContextMenuEvent, QEnterEvent, QMouseEvent
+from PyQt6.QtGui import QColor, QContextMenuEvent, QEnterEvent, QMouseEvent
 from PyQt6.QtTest import QTest
 from PyQt6.QtWidgets import QApplication, QPushButton, QWidget
 
@@ -1023,6 +1023,70 @@ def case_compact_layout() -> None:
     tiny.shutdown()
 
 
+def _bar_rows(image, color: QColor) -> list[int]:
+    """Rows containing a long horizontal run of the exact bar color."""
+    target = color.rgb()
+    rows: list[int] = []
+    for y in range(image.height()):
+        count = 0
+        for x in range(image.width()):
+            if image.pixelColor(x, y).rgb() == target:
+                count += 1
+        if count >= 40:
+            rows.append(y)
+    return rows
+
+
+def case_critical_usage_bar() -> None:
+    normal, _, _, _, _ = _new_widget(
+        metrics_source=_FakeMetricsSource(
+            memory_percent=94.9, disk_percent=68.0
+        )
+    )
+    normal.show()
+    _process()
+    QTest.qWait(100)
+    normal_image = normal.grab().toImage()
+    teal_rows = _bar_rows(normal_image, qt_widget_module.MEMORY_COLOR)
+    assert teal_rows
+    assert not _bar_rows(normal_image, qt_widget_module.CRITICAL_COLOR)
+    normal_height = len(teal_rows)
+    normal.shutdown()
+
+    critical, _, _, _, _ = _new_widget(
+        metrics_source=_FakeMetricsSource(
+            memory_percent=95.0, disk_percent=68.0
+        )
+    )
+    critical.show()
+    _process()
+    QTest.qWait(100)
+    image = critical.grab().toImage()
+    red_rows = _bar_rows(image, qt_widget_module.CRITICAL_COLOR)
+    blue_rows = _bar_rows(image, qt_widget_module.DISK_COLOR)
+    assert red_rows
+    assert blue_rows
+    assert len(red_rows) > normal_height * 1.25, (
+        normal_height,
+        len(red_rows),
+    )
+    critical.shutdown()
+
+    compact, _, _, _, _ = _new_widget(
+        GpSettings(diameter=91),
+        metrics_source=_FakeMetricsSource(
+            memory_percent=96.0, disk_percent=68.0
+        ),
+    )
+    compact.show()
+    _process()
+    QTest.qWait(80)
+    assert _bar_rows(
+        compact.grab().toImage(), qt_widget_module.CRITICAL_COLOR
+    )
+    compact.shutdown()
+
+
 def case_input_click_through_follows_shift() -> None:
     mode = _FakeInputMode(supported=True)
     widget, _, _, _, _ = _new_widget(input_mode=mode)
@@ -1291,6 +1355,7 @@ _CASES = {
     "metrics_timer_lifecycle": case_metrics_timer_lifecycle,
     "metrics_does_not_persist": case_metrics_does_not_persist,
     "compact_layout": case_compact_layout,
+    "critical_usage_bar": case_critical_usage_bar,
     "input_click_through_follows_shift": (
         case_input_click_through_follows_shift
     ),

@@ -16,6 +16,7 @@ from quicktools.plugins.gp.metrics import (
     format_gb,
     format_percent,
     format_usage_detail,
+    is_critical,
     parse_meminfo,
     system_disk_path,
     usage_from_counts,
@@ -94,6 +95,23 @@ def test_usage_from_counts_clamps_and_handles_zero_total() -> None:
 )
 def test_format_percent(value: object, expected: str) -> None:
     assert format_percent(value) == expected  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        (94.9, False),
+        (95.0, True),
+        (95.1, True),
+        (100.0, True),
+        (None, False),
+        (float("nan"), False),
+        ("bad", False),
+        (True, False),
+    ],
+)
+def test_is_critical(value: object, expected: bool) -> None:
+    assert is_critical(value) is expected  # type: ignore[arg-type]
 
 
 @pytest.mark.parametrize(
